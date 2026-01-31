@@ -22,6 +22,9 @@ import {
   Pause,
   AlertTriangle,
   Laptop,
+  Mic,
+  MicOff,
+  Volume2,
 } from "lucide-react";
 
 const API_URL = "http://localhost:8000";
@@ -49,8 +52,15 @@ export default function Home() {
   const [lastObservation, setLastObservation] = useState<string>("");
   const [isProductive, setIsProductive] = useState(true);
   
-  // Interjection popup
+  // Interjection popup: message, strike (1–3), phase (alert → listening → ready)
   const [interjection, setInterjection] = useState<string | null>(null);
+  const [interjectionStrikeCount, setInterjectionStrikeCount] = useState(1);
+  const [interjectionPhase, setInterjectionPhase] = useState<"alert" | "listening" | "ready">("alert");
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const interjectionTtsPlayedRef = useRef(false);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
 
   const screenVideoRef = useRef<HTMLVideoElement>(null);
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
@@ -79,9 +89,12 @@ export default function Home() {
     }
   }, []);
 
-  // Trigger interjection - grabs user attention
-  const triggerInterjection = useCallback(async (message: string) => {
+  // Trigger interjection - grabs user attention; strikeCount 1–3 for TTS tone
+  const triggerInterjection = useCallback(async (message: string, strikeCount: number = 1) => {
     setInterjection(message);
+    setInterjectionStrikeCount(Math.max(1, Math.min(3, strikeCount)));
+    setInterjectionPhase("alert");
+    interjectionTtsPlayedRef.current = false;
 
     // 1. Play alert sound (beep)
     try {
@@ -130,6 +143,37 @@ export default function Home() {
       }
     }
   }, []);
+
+  // When interjection modal is in "alert" phase, play TTS once then switch to "listening"
+  useEffect(() => {
+    if (!interjection || interjectionPhase !== "alert" || interjectionTtsPlayedRef.current) return;
+    interjectionTtsPlayedRef.current = true;
+    (async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/interjection-speech`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: interjection,
+            strike_count: interjectionStrikeCount,
+          }),
+        });
+        if (!res.ok) throw new Error("TTS failed");
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          setInterjectionPhase("listening");
+        };
+        audio.onerror = () => setInterjectionPhase("listening");
+        await audio.play();
+      } catch (e) {
+        console.error("TTS error:", e);
+        setInterjectionPhase("listening");
+      }
+    })();
+  }, [interjection, interjectionPhase, interjectionStrikeCount]);
 
   // Dark mode
   useEffect(() => {
@@ -303,9 +347,9 @@ export default function Home() {
       setIsProductive(data.is_productive);
       setManagerStatus(data.is_productive ? "✓ Productive" : "⚠ Distracted");
 
-      // Show interjection popup directly if Manager says so
+      // Show interjection popup directly if Manager says so (pass strike_count for TTS tone)
       if (data.interjection && data.interjection_message) {
-        triggerInterjection(data.interjection_message);
+        triggerInterjection(data.interjection_message, data.strike_count ?? 1);
       }
 
       // Refresh tasks if any were updated
@@ -326,14 +370,79 @@ export default function Home() {
     }
   }, [triggerInterjection]);
 
+  const startVoiceResponse = async () => {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      recordedChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size) recordedChunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => {
+        stream.getTracks().forEach((t) => t.stop());
+      };
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setIsRecording(true);
+    } catch (e) {
+      console.error("Mic access failed:", e);
+    }
+  };
+
+  const stopVoiceResponseAndAssess = async () => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state !== "recording") return;
+    recorder.stop();
+    mediaRecorderRef.current = null;
+    setIsRecording(false);
+    setIsTranscribing(true);
+    try {
+      await new Promise((r) => setTimeout(r, 300));
+      const blob = new Blob(recordedChunksRef.current, { type: "audio/webm" });
+      recordedChunksRef.current = [];
+      const formData = new FormData();
+      formData.append("file", blob, "response.webm");
+      const transRes = await fetch(`${API_URL}/api/transcribe`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!transRes.ok) throw new Error("Transcribe failed");
+      const { text } = await transRes.json();
+      if (text?.trim() && tasks.length > 0) {
+        const assessRes = await fetch(`${API_URL}/api/assess-task-completion`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transcript: text, task_list: tasks }),
+        });
+        if (assessRes.ok) {
+          const tasksRes = await fetch(`${API_URL}/api/tasks`);
+          setTasks(await tasksRes.json());
+        }
+      }
+    } catch (e) {
+      console.error("Transcribe/assess error:", e);
+    } finally {
+      setIsTranscribing(false);
+      setInterjectionPhase("ready");
+    }
+  };
+
   const acknowledgeInterjection = async () => {
     setInterjection(null);
+    setInterjectionPhase("alert");
     // Stop title flashing
     if (titleIntervalRef.current) {
       clearInterval(titleIntervalRef.current);
       titleIntervalRef.current = null;
     }
     document.title = originalTitle.current;
+
+    // Acknowledge on backend (resets strike count)
+    try {
+      await fetch(`${API_URL}/api/interjection/acknowledge`, { method: "POST" });
+    } catch (e) {
+      console.log("Acknowledge failed:", e);
+    }
 
     // LOCAL MODE: Switch to productive app (Cursor, VS Code, etc.)
     if (localModeRef.current) {
@@ -392,18 +501,67 @@ export default function Home() {
 
   return (
     <div className="h-screen overflow-hidden bg-zinc-50 dark:bg-zinc-950 transition-colors">
-      {/* Interjection Popup */}
+      {/* Interjection Popup: TTS → voice response → acknowledge */}
       {interjection && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="mx-4 max-w-md rounded-xl bg-white p-6 shadow-2xl dark:bg-zinc-900">
             <div className="mb-4 flex items-center gap-3 text-orange-500">
               <AlertTriangle className="h-8 w-8" />
-              <h2 className="text-xl font-bold">Hey, focus!</h2>
+              <h2 className="text-xl font-bold">
+                {interjectionPhase === "alert" && "Hey, focus!"}
+                {interjectionPhase === "listening" && "Your turn"}
+                {interjectionPhase === "ready" && "Back to work"}
+              </h2>
             </div>
-            <p className="mb-6 text-zinc-700 dark:text-zinc-300">{interjection}</p>
-            <Button onClick={acknowledgeInterjection} className="w-full">
-              Got it, back to work!
-            </Button>
+            <p className="mb-4 text-zinc-700 dark:text-zinc-300">{interjection}</p>
+
+            {interjectionPhase === "alert" && (
+              <p className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
+                <Volume2 className="h-4 w-4" />
+                Playing message…
+              </p>
+            )}
+
+            {interjectionPhase === "listening" && (
+              <div className="mb-4 space-y-3">
+                <p className="text-sm text-muted-foreground">
+                  How much of the work have you completed? Tell me which tasks you&apos;ve finished.
+                </p>
+                {isTranscribing ? (
+                  <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Assessing your progress…
+                  </p>
+                ) : isRecording ? (
+                  <Button
+                    variant="destructive"
+                    onClick={stopVoiceResponseAndAssess}
+                    className="w-full"
+                  >
+                    <MicOff className="mr-2 h-4 w-4" />
+                    Done speaking
+                  </Button>
+                ) : (
+                  <Button
+                    variant="secondary"
+                    onClick={startVoiceResponse}
+                    className="w-full"
+                  >
+                    <Mic className="mr-2 h-4 w-4" />
+                    Start speaking
+                  </Button>
+                )}
+                <Button variant="ghost" size="sm" onClick={() => setInterjectionPhase("ready")} className="w-full text-muted-foreground">
+                  Skip speaking →
+                </Button>
+              </div>
+            )}
+
+            {interjectionPhase === "ready" && (
+              <Button onClick={acknowledgeInterjection} className="w-full">
+                Got it, back to work!
+              </Button>
+            )}
           </div>
         </div>
       )}

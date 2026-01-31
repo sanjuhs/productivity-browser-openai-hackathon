@@ -42,11 +42,11 @@ pnpm dev
 ```
 productivity-browser-openai-hackathon/
 ├── app/                    # Next.js app router pages
-│   ├── page.tsx            # Main UI component
+│   ├── page.tsx            # Main UI + interjection modal
 │   ├── layout.tsx          # Root layout
 │   └── globals.css         # Tailwind styles
 ├── backend/                # Python FastAPI backend
-│   ├── main.py             # API server
+│   ├── main.py             # API server + all agents
 │   ├── pyproject.toml      # Python dependencies (uv)
 │   ├── .venv/              # Virtual environment
 │   └── productivity.db     # SQLite database
@@ -78,28 +78,68 @@ pnpm dev
 
 Open http://localhost:3000
 
+## Multi-Agent Architecture
+
+Three agents work together to monitor productivity:
+
+1. **Observer Agent (30s)** - Captures screen via GPT-4o Vision, stores observations
+2. **Compaction Agent (30min)** - Summarizes observations, resets strikes if ≤3
+3. **Manager Agent (~2min)** - Assesses productivity, triggers interjections
+
+## Interjection System
+
+- **Strike 1-2**: TTS alert → Voice input → Task assessment
+- **Strike 3+**: TTS alert → Force redirect (no voice input)
+- Strikes reset if ≤3 in 30-min window (by compaction agent)
+
 ## API Endpoints
 
+### Core
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/health` | Health check |
 | POST | `/api/analyze-braindump` | Extract tasks from text |
-| POST | `/api/analyze-screen` | Analyze screenshot (OCR → Vision) |
-| GET | `/api/history` | Get analysis history |
-| DELETE | `/api/history` | Clear history |
+| GET | `/api/tasks` | Get all tasks |
+| POST | `/api/tasks` | Add a task |
+| PUT | `/api/tasks/{id}` | Toggle task completion |
 
-## Analysis Pipeline
+### Multi-Agent
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/observe` | Observer agent |
+| POST | `/api/compact` | Compaction agent |
+| POST | `/api/manager` | Manager agent |
+| GET | `/api/next-manager-interval` | Random interval (115-125s) |
 
-1. Screenshot captured in browser
-2. Sent to `/api/analyze-screen`
-3. RapidOCR extracts text (local, fast)
-4. If text > 50 chars → GPT-4o-mini analyzes
-5. If low confidence → GPT-4o Vision fallback
-6. Result stored in SQLite
-7. Response updates UI
+### Interjection
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/interjection` | Check pending interjections |
+| POST | `/api/interjection/acknowledge` | Acknowledge interjection |
+| POST | `/api/interjection-speech` | Generate TTS (MP3) |
+| POST | `/api/non-compliance-speech` | Stern TTS for non-compliance |
+| POST | `/api/transcribe` | Whisper STT |
+| POST | `/api/assess-task-completion` | Voice assessment |
+| GET | `/api/strike-status` | Get strike count |
+
+### Local Mode (macOS)
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/focus-browser` | Focus browser window |
+| POST | `/api/focus-productive-app` | Focus Cursor/VS Code |
 
 ## Tech Stack
 
 - **Frontend**: Next.js 16, React 19, Tailwind CSS 4, ShadcnUI
-- **Backend**: Python 3.12, FastAPI, RapidOCR, OpenAI
+- **Backend**: Python 3.12, FastAPI, OpenAI SDK
 - **Database**: SQLite (productivity.db)
+- **AI Models**: GPT-4o (vision), GPT-4o-mini (text), TTS-1, Whisper-1
+
+## Database Tables
+
+- `tasks` - User tasks (id, text, done)
+- `observations` - Observer outputs (timestamp, app_name, window_title, description)
+- `compactions` - 30-min summaries (timestamp, summary, observations_count, apps_seen)
+- `manager_decisions` - Manager outputs (is_productive, reasoning, interjection, ...)
+- `pending_interjections` - Awaiting frontend acknowledgment
+- `focus_strikes` - Strike count tracking (strike_count, window_start)

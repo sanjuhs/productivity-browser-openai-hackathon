@@ -1,0 +1,67 @@
+---
+description: Productivity Browser Assistant - Project Rules
+globs: ["**/*"]
+alwaysApply: true
+---
+
+# Project Rules
+
+## Package Managers
+
+**CRITICAL**: This project uses specific package managers. DO NOT deviate.
+
+### Python (Backend)
+- **USE**: `uv` (universal virtualenv)
+- **Commands**:
+  - Add dependency: `uv add <package>`
+  - Sync dependencies: `uv sync`
+  - Run script: `uv run python <script.py>`
+  - Run server: `uv run uvicorn main:app --reload --port 8000`
+- **DO NOT USE**: `pip`, `pip3`, `pip install`, `python -m pip`
+- **Location**: All Python code lives in `/backend`
+
+### Node.js (Frontend)
+- **USE**: `pnpm`
+- **Commands**:
+  - Add dependency: `pnpm add <package>`
+  - Install all: `pnpm install`
+  - Dev server: `pnpm dev`
+  - Build: `pnpm build`
+- **DO NOT USE**: `npm`, `yarn`, `npm install`, `yarn add`
+- **Location**: Frontend code lives in root directory
+
+## Project Structure
+
+```
+/
+├── app/                 # Next.js pages
+├── components/          # React components
+├── lib/                 # Utilities
+├── backend/             # Python FastAPI
+│   ├── main.py          # API server
+│   ├── pyproject.toml   # Python deps (uv)
+│   └── .venv/           # Virtual environment
+├── package.json         # Node deps (pnpm)
+└── .env                 # Environment variables
+```
+
+## Tech Stack
+
+- **Frontend**: Next.js 16, React 19, Tailwind CSS 4, ShadcnUI
+- **Backend**: Python 3.12, FastAPI, RapidOCR, OpenAI
+- **Database**: SQLite (local)
+
+## API Keys
+
+- Store in `.env` at project root
+- Backend reads from parent directory: `Path(__file__).parent.parent / ".env"`
+
+## Running the Project
+
+```bash
+# Terminal 1 - Backend
+cd backend && uv run uvicorn main:app --reload --port 8000
+
+# Terminal 2 - Frontend
+pnpm dev
+```

@@ -21,6 +21,7 @@ import {
   Play,
   Pause,
   AlertTriangle,
+  Laptop,
 } from "lucide-react";
 
 const API_URL = "http://localhost:8000";
@@ -40,6 +41,7 @@ export default function Home() {
   const [capturing, setCapturing] = useState(false);
   const [cameraOn, setCameraOn] = useState(false);
   const [autoMode, setAutoMode] = useState(false);
+  const [localMode, setLocalMode] = useState(true); // Local mode ON by default
   
   // Agent states
   const [observerStatus, setObserverStatus] = useState<string>("Idle");
@@ -60,6 +62,7 @@ export default function Home() {
   const managerRef = useRef<NodeJS.Timeout | null>(null);
   const compactionRef = useRef<NodeJS.Timeout | null>(null);
   const autoModeRef = useRef(false); // Track autoMode for callbacks
+  const localModeRef = useRef(true); // Track localMode for callbacks
   const titleIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const originalTitle = useRef("Multi-Agent Productivity");
 
@@ -77,7 +80,7 @@ export default function Home() {
   }, []);
 
   // Trigger interjection - grabs user attention
-  const triggerInterjection = useCallback((message: string) => {
+  const triggerInterjection = useCallback(async (message: string) => {
     setInterjection(message);
 
     // 1. Play alert sound (beep)
@@ -116,10 +119,15 @@ export default function Home() {
 
     // 4. Try to focus our window/tab
     window.focus();
-    
-    // Also try to make the window visible if minimized (limited browser support)
-    if (document.visibilityState === "hidden") {
-      // The notification click will bring focus
+
+    // 5. LOCAL MODE: Use backend to switch to browser window (macOS)
+    if (localModeRef.current) {
+      try {
+        await fetch(`${API_URL}/api/focus-browser`, { method: "POST" });
+        console.log("Local mode: Focused browser window");
+      } catch (e) {
+        console.log("Local mode: Could not focus browser");
+      }
     }
   }, []);
 
@@ -150,6 +158,12 @@ export default function Home() {
     setDarkMode(newMode);
     localStorage.setItem("darkMode", String(newMode));
     document.documentElement.classList.toggle("dark", newMode);
+  };
+
+  const toggleLocalMode = () => {
+    const newMode = !localMode;
+    setLocalMode(newMode);
+    localModeRef.current = newMode;
   };
 
   // Task management
@@ -312,7 +326,7 @@ export default function Home() {
     }
   }, [triggerInterjection]);
 
-  const acknowledgeInterjection = () => {
+  const acknowledgeInterjection = async () => {
     setInterjection(null);
     // Stop title flashing
     if (titleIntervalRef.current) {
@@ -320,6 +334,19 @@ export default function Home() {
       titleIntervalRef.current = null;
     }
     document.title = originalTitle.current;
+
+    // LOCAL MODE: Switch to productive app (Cursor, VS Code, etc.)
+    if (localModeRef.current) {
+      try {
+        const res = await fetch(`${API_URL}/api/focus-productive-app`, { method: "POST" });
+        const data = await res.json();
+        if (data.app) {
+          console.log(`Local mode: Switched to ${data.app}`);
+        }
+      } catch (e) {
+        console.log("Local mode: Could not switch to productive app");
+      }
+    }
   };
 
   // Auto mode control
@@ -400,6 +427,17 @@ export default function Home() {
           <div className="flex items-center gap-2">
             <Button size="sm" variant="ghost" onClick={toggleDarkMode} className="h-8 w-8 p-0">
               {darkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </Button>
+
+            <Button
+              size="sm"
+              variant={localMode ? "default" : "outline"}
+              onClick={toggleLocalMode}
+              className={`h-8 ${localMode ? "bg-blue-600 hover:bg-blue-700" : ""}`}
+              title="Local mode: Switch windows on interjection (macOS)"
+            >
+              <Laptop className="mr-1.5 h-3.5 w-3.5" />
+              Local
             </Button>
 
             {capturing && (

@@ -11,9 +11,11 @@ import base64
 import json
 import logging
 import os
+import platform
 import random
 import re
 import sqlite3
+import subprocess
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -784,6 +786,202 @@ def clear_history():
     conn.close()
     logger.info("All history cleared")
     return {"status": "cleared"}
+
+
+# ============================================================
+# Local Window Control (macOS)
+# ============================================================
+
+def run_applescript(script: str) -> bool:
+    """Run AppleScript on macOS"""
+    if platform.system() != "Darwin":
+        logger.warning("Window control only supported on macOS")
+        return False
+    try:
+        subprocess.run(["osascript", "-e", script], check=True, capture_output=True)
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"AppleScript failed: {e}")
+        return False
+
+
+@app.post("/api/focus-browser")
+def focus_browser():
+    """
+    Focus the browser window AND switch to the Productivity Assistant tab.
+    Called when interjection is triggered in local mode.
+    """
+    logger.info("")
+    logger.info("🪟 FOCUS BROWSER (Local Mode)")
+    logger.info("─" * 40)
+    
+    # Chrome: Activate and switch to localhost:3000 tab
+    chrome_script = '''
+        tell application "Google Chrome"
+            activate
+            set targetURL to "localhost:3000"
+            set foundTab to false
+            
+            repeat with w in windows
+                set tabIndex to 1
+                repeat with t in tabs of w
+                    if URL of t contains targetURL then
+                        set active tab index of w to tabIndex
+                        set index of w to 1
+                        set foundTab to true
+                        return "found"
+                    end if
+                    set tabIndex to tabIndex + 1
+                end repeat
+            end repeat
+            
+            return "not_found"
+        end tell
+    '''
+    
+    # Arc: Similar approach
+    arc_script = '''
+        tell application "Arc"
+            activate
+            set targetURL to "localhost:3000"
+            
+            repeat with w in windows
+                repeat with t in tabs of w
+                    if URL of t contains targetURL then
+                        tell t to select
+                        return "found"
+                    end if
+                end repeat
+            end repeat
+            
+            return "not_found"
+        end tell
+    '''
+    
+    # Safari
+    safari_script = '''
+        tell application "Safari"
+            activate
+            set targetURL to "localhost:3000"
+            
+            repeat with w in windows
+                set tabIndex to 1
+                repeat with t in tabs of w
+                    if URL of t contains targetURL then
+                        set current tab of w to t
+                        set index of w to 1
+                        return "found"
+                    end if
+                    set tabIndex to tabIndex + 1
+                end repeat
+            end repeat
+            
+            return "not_found"
+        end tell
+    '''
+    
+    browsers = [
+        ("Google Chrome", chrome_script),
+        ("Arc", arc_script),
+        ("Safari", safari_script),
+    ]
+    
+    for browser_name, script in browsers:
+        # Check if browser is running
+        check_script = f'''
+            tell application "System Events"
+                if (name of processes) contains "{browser_name}" then
+                    return "running"
+                end if
+            end tell
+            return "not running"
+        '''
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", check_script],
+                capture_output=True, text=True
+            )
+            if "running" in result.stdout:
+                # Try to find and switch to the tab
+                tab_result = subprocess.run(
+                    ["osascript", "-e", script],
+                    capture_output=True, text=True
+                )
+                if "found" in tab_result.stdout:
+                    logger.info(f"  Activated: {browser_name}")
+                    logger.info(f"  Switched to: localhost:3000 tab")
+                    logger.info("─" * 40)
+                    return {"status": "focused", "app": browser_name, "tab_found": True}
+                else:
+                    # Tab not found but browser activated
+                    logger.info(f"  Activated: {browser_name}")
+                    logger.info(f"  Tab not found (localhost:3000)")
+                    logger.info("─" * 40)
+                    return {"status": "focused", "app": browser_name, "tab_found": False}
+        except Exception as e:
+            logger.error(f"  Failed with {browser_name}: {e}")
+            continue
+    
+    logger.info("  No supported browser found running")
+    logger.info("─" * 40)
+    return {"status": "no_browser", "app": None, "tab_found": False}
+
+
+@app.post("/api/focus-productive-app")
+def focus_productive_app():
+    """
+    Focus a productive app (Cursor, VS Code, Terminal, etc.)
+    Called when user acknowledges interjection in local mode.
+    """
+    logger.info("")
+    logger.info("🪟 FOCUS PRODUCTIVE APP (Local Mode)")
+    logger.info("─" * 40)
+    
+    # Priority list of productive apps
+    productive_apps = [
+        "Cursor",
+        "Code",  # VS Code
+        "Visual Studio Code",
+        "Terminal",
+        "iTerm2",
+        "Warp",
+        "Xcode",
+        "IntelliJ IDEA",
+        "PyCharm",
+        "WebStorm",
+    ]
+    
+    for app in productive_apps:
+        check_script = f'''
+            tell application "System Events"
+                if (name of processes) contains "{app}" then
+                    return "running"
+                end if
+            end tell
+            return "not running"
+        '''
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", check_script],
+                capture_output=True, text=True
+            )
+            if "running" in result.stdout:
+                activate_script = f'''
+                    tell application "{app}"
+                        activate
+                    end tell
+                '''
+                if run_applescript(activate_script):
+                    logger.info(f"  Activated: {app}")
+                    logger.info("─" * 40)
+                    return {"status": "focused", "app": app}
+        except Exception as e:
+            logger.error(f"  Failed to check {app}: {e}")
+            continue
+    
+    logger.info("  No productive app found running, staying in browser")
+    logger.info("─" * 40)
+    return {"status": "no_app", "app": None}
 
 
 # ============================================================

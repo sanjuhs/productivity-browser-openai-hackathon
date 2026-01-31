@@ -18,56 +18,109 @@ import {
   Moon,
   Video,
   VideoOff,
-  Eye,
   Play,
   Pause,
-  Clock,
+  AlertTriangle,
 } from "lucide-react";
 
 const API_URL = "http://localhost:8000";
 
-interface Summary {
-  timestamp: string;
-  summary: string;
+interface Task {
+  id: number;
+  text: string;
+  done: boolean;
 }
 
 export default function Home() {
   const [darkMode, setDarkMode] = useState(false);
   const [dailyInput, setDailyInput] = useState("");
-  const [focusTask, setFocusTask] = useState("");
-  const [tasks, setTasks] = useState<{ text: string; done: boolean }[]>([]);
-  const [analyzing, setAnalyzing] = useState(false);
+  const [newTask, setNewTask] = useState("");
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [extracting, setExtracting] = useState(false);
   const [capturing, setCapturing] = useState(false);
   const [cameraOn, setCameraOn] = useState(false);
-  const [autoAnalyze, setAutoAnalyze] = useState(false);
-  const [companionThought, setCompanionThought] = useState("Ready to help you focus!");
-  const [isFocused, setIsFocused] = useState(true);
-  const [lastAnalysis, setLastAnalysis] = useState("");
-  const [analysisMethod, setAnalysisMethod] = useState<string | null>(null);
-  const [lastAnalyzeTime, setLastAnalyzeTime] = useState<Date | null>(null);
-  const [summaries, setSummaries] = useState<Summary[]>([]);
+  const [autoMode, setAutoMode] = useState(false);
   
-  // Config from backend
-  const [analysisInterval, setAnalysisInterval] = useState(2000); // 2 seconds default
-  const [summaryInterval, setSummaryInterval] = useState(180000); // 3 minutes default
+  // Agent states
+  const [observerStatus, setObserverStatus] = useState<string>("Idle");
+  const [managerStatus, setManagerStatus] = useState<string>("Idle");
+  const [lastObservation, setLastObservation] = useState<string>("");
+  const [isProductive, setIsProductive] = useState(true);
+  
+  // Interjection popup
+  const [interjection, setInterjection] = useState<string | null>(null);
 
   const screenVideoRef = useRef<HTMLVideoElement>(null);
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const cameraStreamRef = useRef<MediaStream | null>(null);
-  const autoAnalyzeRef = useRef<NodeJS.Timeout | null>(null);
-  const summaryRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Agent intervals
+  const observerRef = useRef<NodeJS.Timeout | null>(null);
+  const managerRef = useRef<NodeJS.Timeout | null>(null);
+  const compactionRef = useRef<NodeJS.Timeout | null>(null);
+  const autoModeRef = useRef(false); // Track autoMode for callbacks
+  const titleIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const originalTitle = useRef("Multi-Agent Productivity");
 
-  // Fetch config from backend on mount
+  // Load tasks from backend on mount
   useEffect(() => {
-    fetch(`${API_URL}/api/config`)
+    fetch(`${API_URL}/api/tasks`)
       .then((res) => res.json())
-      .then((data) => {
-        setAnalysisInterval(data.analysis_interval_seconds * 1000);
-        setSummaryInterval(data.summary_interval_seconds * 1000);
-      })
+      .then(setTasks)
       .catch(console.error);
+    
+    // Request notification permission
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
+  }, []);
+
+  // Trigger interjection - grabs user attention
+  const triggerInterjection = useCallback((message: string) => {
+    setInterjection(message);
+
+    // 1. Play alert sound (beep)
+    try {
+      const audioCtx = new AudioContext();
+      const oscillator = audioCtx.createOscillator();
+      const gainNode = audioCtx.createGain();
+      oscillator.connect(gainNode);
+      gainNode.connect(audioCtx.destination);
+      oscillator.frequency.value = 800;
+      oscillator.type = "sine";
+      gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+      gainNode.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.5);
+      oscillator.start(audioCtx.currentTime);
+      oscillator.stop(audioCtx.currentTime + 0.5);
+    } catch (e) {
+      console.log("Audio not available");
+    }
+
+    // 2. Desktop notification
+    if ("Notification" in window && Notification.permission === "granted") {
+      new Notification("🚨 Focus Check!", {
+        body: message,
+        icon: "/favicon.ico",
+        requireInteraction: true,
+      });
+    }
+
+    // 3. Flash the tab title
+    let flash = true;
+    if (titleIntervalRef.current) clearInterval(titleIntervalRef.current);
+    titleIntervalRef.current = setInterval(() => {
+      document.title = flash ? "🚨 FOCUS! 🚨" : originalTitle.current;
+      flash = !flash;
+    }, 500);
+
+    // 4. Try to focus our window/tab
+    window.focus();
+    
+    // Also try to make the window visible if minimized (limited browser support)
+    if (document.visibilityState === "hidden") {
+      // The notification click will bring focus
+    }
   }, []);
 
   // Dark mode
@@ -79,7 +132,7 @@ export default function Home() {
     }
   }, []);
 
-  // Connect streams to video elements
+  // Connect streams
   useEffect(() => {
     if (capturing && screenVideoRef.current && screenStreamRef.current) {
       screenVideoRef.current.srcObject = screenStreamRef.current;
@@ -96,22 +149,33 @@ export default function Home() {
     const newMode = !darkMode;
     setDarkMode(newMode);
     localStorage.setItem("darkMode", String(newMode));
-    if (newMode) {
-      document.documentElement.classList.add("dark");
-    } else {
-      document.documentElement.classList.remove("dark");
+    document.documentElement.classList.toggle("dark", newMode);
+  };
+
+  // Task management
+  const addTask = async () => {
+    if (!newTask.trim()) return;
+    try {
+      const res = await fetch(`${API_URL}/api/tasks`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: newTask }),
+      });
+      const task = await res.json();
+      setTasks([...tasks, task]);
+      setNewTask("");
+    } catch (e) {
+      console.error("Failed to add task:", e);
     }
   };
 
-  const addTask = () => {
-    if (focusTask.trim()) {
-      setTasks([...tasks, { text: focusTask, done: false }]);
-      setFocusTask("");
+  const toggleTask = async (task: Task) => {
+    try {
+      await fetch(`${API_URL}/api/tasks/${task.id}?done=${!task.done}`, { method: "PATCH" });
+      setTasks(tasks.map((t) => (t.id === task.id ? { ...t, done: !t.done } : t)));
+    } catch (e) {
+      console.error("Failed to toggle task:", e);
     }
-  };
-
-  const toggleTask = (index: number) => {
-    setTasks(tasks.map((t, i) => (i === index ? { ...t, done: !t.done } : t)));
   };
 
   const extractTasks = async () => {
@@ -125,12 +189,16 @@ export default function Home() {
       });
       const data = await res.json();
       if (data.tasks) {
-        setTasks((prev) => [
-          ...prev,
-          ...data.tasks.map((t: string) => ({ text: t, done: false })),
-        ]);
+        for (const text of data.tasks) {
+          const taskRes = await fetch(`${API_URL}/api/tasks`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ text }),
+          });
+          const task = await taskRes.json();
+          setTasks((prev) => [...prev, task]);
+        }
       }
-      if (data.analysis) setLastAnalysis(data.analysis);
     } catch (e) {
       console.error("Extract failed:", e);
     } finally {
@@ -138,18 +206,16 @@ export default function Home() {
     }
   };
 
+  // Screen capture
   const startScreenCapture = async () => {
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: false,
-      });
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
       screenStreamRef.current = stream;
       setCapturing(true);
       stream.getVideoTracks()[0].onended = () => {
         setCapturing(false);
         screenStreamRef.current = null;
-        setAutoAnalyze(false);
+        stopAutoMode();
       };
     } catch (e) {
       console.error("Screen capture failed:", e);
@@ -157,20 +223,15 @@ export default function Home() {
   };
 
   const stopScreenCapture = () => {
-    if (screenStreamRef.current) {
-      screenStreamRef.current.getTracks().forEach((t) => t.stop());
-      screenStreamRef.current = null;
-    }
+    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    screenStreamRef.current = null;
     setCapturing(false);
-    setAutoAnalyze(false);
+    stopAutoMode();
   };
 
   const startCamera = async () => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "user", width: 640, height: 480 },
-        audio: false,
-      });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
       cameraStreamRef.current = stream;
       setCameraOn(true);
     } catch (e) {
@@ -179,194 +240,177 @@ export default function Home() {
   };
 
   const stopCamera = () => {
-    if (cameraStreamRef.current) {
-      cameraStreamRef.current.getTracks().forEach((t) => t.stop());
-      cameraStreamRef.current = null;
-    }
+    cameraStreamRef.current?.getTracks().forEach((t) => t.stop());
+    cameraStreamRef.current = null;
     setCameraOn(false);
   };
 
-  const captureFrame = (video: HTMLVideoElement): string | null => {
+  const captureFrame = (): string | null => {
+    const video = screenVideoRef.current;
     if (!video || video.videoWidth === 0) return null;
     const canvas = document.createElement("canvas");
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return null;
-    ctx.drawImage(video, 0, 0);
-    return canvas.toDataURL("image/jpeg", 0.8).split(",")[1];
+    canvas.getContext("2d")?.drawImage(video, 0, 0);
+    return canvas.toDataURL("image/jpeg", 0.7).split(",")[1];
   };
 
-  const generateSummary = async () => {
+  // Observer Agent (30s)
+  const runObserver = useCallback(async () => {
+    if (!capturing) return;
+    const frame = captureFrame();
+    if (!frame) return;
+
+    setObserverStatus("Observing...");
     try {
-      const res = await fetch(`${API_URL}/api/generate-summary`, { method: "POST" });
-      if (res.ok) {
-        const data = await res.json();
-        setSummaries((prev) => [
-          { timestamp: data.timestamp, summary: data.summary },
-          ...prev.slice(0, 9), // Keep last 10
-        ]);
-      }
-    } catch (e) {
-      console.error("Summary generation failed:", e);
-    }
-  };
-
-  const analyzeScreen = useCallback(async () => {
-    const hasScreen = capturing && screenVideoRef.current && screenStreamRef.current;
-    const hasCamera = cameraOn && cameraVideoRef.current && cameraStreamRef.current;
-
-    if (!hasScreen && !hasCamera) {
-      setCompanionThought("Start screen capture or camera first!");
-      return;
-    }
-
-    setAnalyzing(true);
-    setCompanionThought("Analyzing...");
-
-    try {
-      let imageBase64: string | null = null;
-
-      if (hasScreen && screenVideoRef.current) {
-        imageBase64 = captureFrame(screenVideoRef.current);
-      } else if (hasCamera && cameraVideoRef.current) {
-        imageBase64 = captureFrame(cameraVideoRef.current);
-      }
-
-      if (!imageBase64) {
-        throw new Error("Could not capture frame");
-      }
-
-      const currentTaskTexts = tasks.filter((t) => !t.done).map((t) => t.text);
-
-      const res = await fetch(`${API_URL}/api/analyze-screen`, {
+      const res = await fetch(`${API_URL}/api/observe`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          image_base64: imageBase64,
-          current_tasks: currentTaskTexts,
-        }),
+        body: JSON.stringify({ image_base64: frame }),
       });
-
-      if (!res.ok) throw new Error(`API error: ${res.status}`);
-
       const data = await res.json();
+      setLastObservation(`${data.app_name}: ${data.description.slice(0, 100)}...`);
+      setObserverStatus(`Last: ${new Date().toLocaleTimeString()}`);
+    } catch (e) {
+      setObserverStatus("Error");
+    }
+  }, [capturing]);
 
-      if (data.analysis) setLastAnalysis(data.analysis);
-      if (data.thought) setCompanionThought(data.thought);
-      if (data.is_focused !== undefined) setIsFocused(data.is_focused);
-      if (data.method) setAnalysisMethod(data.method);
-      setLastAnalyzeTime(new Date());
+  // Manager Agent (45-60s random)
+  const runManager = useCallback(async () => {
+    setManagerStatus("Checking...");
+    try {
+      const res = await fetch(`${API_URL}/api/manager`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json();
+      setIsProductive(data.is_productive);
+      setManagerStatus(data.is_productive ? "✓ Productive" : "⚠ Distracted");
 
-      // Complete tasks that match (no new tasks created)
-      if (data.tasks_to_complete?.length) {
-        setTasks((prev) =>
-          prev.map((task) => {
-            const shouldComplete = data.tasks_to_complete.some(
-              (completed: string) =>
-                task.text.toLowerCase().includes(completed.toLowerCase()) ||
-                completed.toLowerCase().includes(task.text.toLowerCase())
-            );
-            return shouldComplete ? { ...task, done: true } : task;
-          })
-        );
+      // Show interjection popup directly if Manager says so
+      if (data.interjection && data.interjection_message) {
+        triggerInterjection(data.interjection_message);
+      }
+
+      // Refresh tasks if any were updated
+      if (data.tasks_updated?.length) {
+        const tasksRes = await fetch(`${API_URL}/api/tasks`);
+        setTasks(await tasksRes.json());
+      }
+
+      // Schedule next manager check with random interval (use ref to avoid stale closure)
+      if (autoModeRef.current) {
+        const intervalRes = await fetch(`${API_URL}/api/next-manager-interval`);
+        const { interval_seconds } = await intervalRes.json();
+        console.log(`Manager: scheduling next check in ${interval_seconds}s`);
+        managerRef.current = setTimeout(runManager, interval_seconds * 1000);
       }
     } catch (e) {
-      console.error("Analysis failed:", e);
-      setCompanionThought("Couldn't analyze. Try again?");
-    } finally {
-      setAnalyzing(false);
+      setManagerStatus("Error");
     }
-  }, [capturing, cameraOn, tasks]);
+  }, [triggerInterjection]);
 
-  // Auto-analyze at configured interval
-  useEffect(() => {
-    if (autoAnalyze && (capturing || cameraOn)) {
-      // Analysis interval
-      autoAnalyzeRef.current = setInterval(() => {
-        analyzeScreen();
-      }, analysisInterval);
-
-      // Summary interval
-      summaryRef.current = setInterval(() => {
-        generateSummary();
-      }, summaryInterval);
-
-      // Run analysis immediately on start
-      analyzeScreen();
+  const acknowledgeInterjection = () => {
+    setInterjection(null);
+    // Stop title flashing
+    if (titleIntervalRef.current) {
+      clearInterval(titleIntervalRef.current);
+      titleIntervalRef.current = null;
     }
-
-    return () => {
-      if (autoAnalyzeRef.current) {
-        clearInterval(autoAnalyzeRef.current);
-        autoAnalyzeRef.current = null;
-      }
-      if (summaryRef.current) {
-        clearInterval(summaryRef.current);
-        summaryRef.current = null;
-      }
-    };
-  }, [autoAnalyze, capturing, cameraOn, analyzeScreen, analysisInterval, summaryInterval]);
-
-  const toggleAutoAnalyze = () => {
-    if (!capturing && !cameraOn) {
-      setCompanionThought("Start capture first!");
-      return;
-    }
-    setAutoAnalyze(!autoAnalyze);
+    document.title = originalTitle.current;
   };
 
-  const hasAnyCapture = capturing || cameraOn;
+  // Auto mode control
+  const startAutoMode = () => {
+    if (!capturing) return;
+    setAutoMode(true);
+    autoModeRef.current = true; // Update ref for callbacks
+
+    // Start Observer (every 30s)
+    runObserver();
+    observerRef.current = setInterval(runObserver, 30000);
+
+    // Start Manager (random 45-60s)
+    runManager();
+
+    // Start Compaction (every 30min)
+    compactionRef.current = setInterval(async () => {
+      try {
+        await fetch(`${API_URL}/api/compact`, { method: "POST" });
+      } catch (e) {
+        console.error("Compaction failed:", e);
+      }
+    }, 1800000);
+  };
+
+  const stopAutoMode = () => {
+    setAutoMode(false);
+    autoModeRef.current = false; // Update ref for callbacks
+    if (observerRef.current) clearInterval(observerRef.current);
+    if (managerRef.current) clearTimeout(managerRef.current);
+    if (compactionRef.current) clearInterval(compactionRef.current);
+    observerRef.current = null;
+    managerRef.current = null;
+    compactionRef.current = null;
+    setObserverStatus("Idle");
+    setManagerStatus("Idle");
+  };
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => stopAutoMode();
+  }, []);
 
   return (
     <div className="h-screen overflow-hidden bg-zinc-50 dark:bg-zinc-950 transition-colors">
+      {/* Interjection Popup */}
+      {interjection && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="mx-4 max-w-md rounded-xl bg-white p-6 shadow-2xl dark:bg-zinc-900">
+            <div className="mb-4 flex items-center gap-3 text-orange-500">
+              <AlertTriangle className="h-8 w-8" />
+              <h2 className="text-xl font-bold">Hey, focus!</h2>
+            </div>
+            <p className="mb-6 text-zinc-700 dark:text-zinc-300">{interjection}</p>
+            <Button onClick={acknowledgeInterjection} className="w-full">
+              Got it, back to work!
+            </Button>
+          </div>
+        </div>
+      )}
+
       <div className="mx-auto flex h-full max-w-6xl flex-col px-4 py-3">
         {/* Header */}
         <header className="mb-2 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10">
-              <Sparkles className="h-3.5 w-3.5 text-primary" />
+          <div className="flex items-center gap-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10">
+              <Sparkles className="h-4 w-4 text-primary" />
             </div>
-            <h1 className="text-base font-semibold">Productivity Assistant</h1>
-            <span className="text-[10px] text-muted-foreground">
-              ({analysisInterval / 1000}s interval)
-            </span>
+            <div>
+              <h1 className="text-base font-semibold">Multi-Agent Productivity</h1>
+              <div className="flex gap-3 text-[10px] text-muted-foreground">
+                <span>🔍 Observer: {observerStatus}</span>
+                <span>👔 Manager: {managerStatus}</span>
+              </div>
+            </div>
           </div>
+          
           <div className="flex items-center gap-2">
             <Button size="sm" variant="ghost" onClick={toggleDarkMode} className="h-8 w-8 p-0">
               {darkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </Button>
 
-            {hasAnyCapture && (
+            {capturing && (
               <Button
                 size="sm"
-                variant={autoAnalyze ? "default" : "outline"}
-                onClick={toggleAutoAnalyze}
-                className={`h-8 ${autoAnalyze ? "bg-green-600 hover:bg-green-700" : ""}`}
+                variant={autoMode ? "default" : "outline"}
+                onClick={autoMode ? stopAutoMode : startAutoMode}
+                className={`h-8 ${autoMode ? "bg-green-600 hover:bg-green-700" : ""}`}
               >
-                {autoAnalyze ? (
-                  <Pause className="mr-1.5 h-3.5 w-3.5" />
-                ) : (
-                  <Play className="mr-1.5 h-3.5 w-3.5" />
-                )}
-                Auto
-              </Button>
-            )}
-
-            {hasAnyCapture && (
-              <Button
-                size="sm"
-                variant="default"
-                onClick={analyzeScreen}
-                disabled={analyzing}
-                className="h-8 bg-blue-600 hover:bg-blue-700"
-              >
-                {analyzing ? (
-                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                ) : (
-                  <Eye className="mr-1.5 h-3.5 w-3.5" />
-                )}
-                Analyze
+                {autoMode ? <Pause className="mr-1.5 h-3.5 w-3.5" /> : <Play className="mr-1.5 h-3.5 w-3.5" />}
+                {autoMode ? "Stop Agents" : "Start Agents"}
               </Button>
             )}
 
@@ -394,7 +438,7 @@ export default function Home() {
 
         {/* Main Grid */}
         <div className="grid min-h-0 flex-1 grid-cols-3 gap-2">
-          {/* Left - Brain Dump + Summaries */}
+          {/* Left - Brain Dump */}
           <Card className="flex flex-col border-zinc-200 dark:border-zinc-800">
             <CardHeader className="py-2 px-3">
               <CardTitle className="flex items-center gap-1.5 text-sm font-medium">
@@ -402,174 +446,123 @@ export default function Home() {
                 Brain Dump
               </CardTitle>
             </CardHeader>
-            <CardContent className="flex flex-1 flex-col gap-2 px-3 pb-3 pt-0 overflow-hidden">
+            <CardContent className="flex flex-1 flex-col gap-2 px-3 pb-3 pt-0">
               <Textarea
-                placeholder="Dump your thoughts..."
-                className="min-h-[80px] resize-none text-sm"
+                placeholder="Dump your thoughts, goals, plans..."
+                className="min-h-[100px] resize-none text-sm"
                 value={dailyInput}
                 onChange={(e) => setDailyInput(e.target.value)}
               />
-              <div className="flex items-center justify-between">
-                <span className="text-xs text-muted-foreground">{dailyInput.length}</span>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={extractTasks}
-                  disabled={extracting || !dailyInput.trim()}
-                  className="h-6 text-xs"
-                >
-                  {extracting ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Sparkles className="mr-1 h-3 w-3" />}
-                  Extract Tasks
-                </Button>
-              </div>
-              
-              {/* Activity Summaries */}
-              <div className="flex-1 min-h-0 overflow-y-auto space-y-2">
-                {lastAnalysis && (
-                  <div className="rounded bg-blue-50 dark:bg-blue-950/30 p-2 text-xs text-blue-700 dark:text-blue-300">
-                    <span className="font-medium">Current: </span>{lastAnalysis}
-                  </div>
-                )}
-                {summaries.map((s, i) => (
-                  <div key={i} className="rounded bg-zinc-100 dark:bg-zinc-900 p-2 text-xs text-muted-foreground">
-                    <div className="text-[10px] text-muted-foreground/60 mb-1">
-                      {new Date(s.timestamp).toLocaleTimeString()}
-                    </div>
-                    {s.summary}
-                  </div>
-                ))}
-              </div>
-            </CardContent>
-          </Card>
-
-          {/* Center - Companion & Preview */}
-          <Card className="flex flex-col border-zinc-200 dark:border-zinc-800">
-            <CardHeader className="py-2 px-3">
-              <CardTitle className="flex items-center justify-between text-sm font-medium">
-                <span>Companion</span>
-                {analysisMethod && (
-                  <span className="text-[10px] font-normal text-muted-foreground">
-                    via {analysisMethod.toUpperCase()}
-                  </span>
-                )}
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="flex flex-1 flex-col gap-2 px-3 pb-3 pt-0">
-              <div className="relative flex-1 overflow-hidden rounded-lg bg-zinc-900">
-                {capturing && (
-                  <video ref={screenVideoRef} autoPlay playsInline muted className="h-full w-full object-contain" />
-                )}
-
-                {!capturing && (
-                  <div className="flex h-full flex-col items-center justify-center bg-zinc-100 dark:bg-zinc-900">
-                    <div className="relative">
-                      <div
-                        className={`flex h-16 w-16 items-center justify-center rounded-full transition-all ${
-                          isFocused
-                            ? "bg-gradient-to-br from-green-200 to-green-400 dark:from-green-800 dark:to-green-600"
-                            : "bg-gradient-to-br from-orange-200 to-orange-400 dark:from-orange-800 dark:to-orange-600"
-                        }`}
-                      >
-                        <span className="text-3xl">{isFocused ? "😊" : "🤔"}</span>
-                      </div>
-                      <div
-                        className={`absolute -bottom-0.5 -right-0.5 h-4 w-4 rounded-full border-2 border-white dark:border-zinc-900 ${
-                          isFocused ? "bg-green-500" : "bg-orange-500"
-                        }`}
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {capturing && (
-                  <div className="absolute top-2 left-2 flex items-center gap-2">
-                    <div className="flex items-center gap-1 rounded-full bg-red-500 px-2 py-0.5 text-[10px] font-medium text-white">
-                      <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-white" />
-                      LIVE
-                    </div>
-                    {autoAnalyze && (
-                      <div className="flex items-center gap-1 rounded-full bg-green-500 px-2 py-0.5 text-[10px] font-medium text-white">
-                        <Clock className="h-2.5 w-2.5" />
-                        AUTO
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {cameraOn && (
-                  <div className="absolute bottom-2 right-2 h-20 w-28 overflow-hidden rounded-lg border-2 border-white shadow-lg dark:border-zinc-700">
-                    <video ref={cameraVideoRef} autoPlay playsInline muted className="h-full w-full object-cover" />
-                  </div>
-                )}
-              </div>
-
-              <div
-                className={`rounded-lg px-3 py-2 text-center text-xs transition-colors ${
-                  isFocused
-                    ? "bg-green-50 text-green-700 dark:bg-green-950 dark:text-green-300"
-                    : "bg-orange-50 text-orange-700 dark:bg-orange-950 dark:text-orange-300"
-                }`}
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={extractTasks}
+                disabled={extracting || !dailyInput.trim()}
+                className="h-7 text-xs"
               >
-                {analyzing ? (
-                  <span className="flex items-center justify-center gap-1">
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                    Analyzing...
-                  </span>
-                ) : (
-                  companionThought
-                )}
-              </div>
-
-              {lastAnalyzeTime && (
-                <div className="text-center text-[10px] text-muted-foreground">
-                  Last: {lastAnalyzeTime.toLocaleTimeString()}
+                {extracting ? <Loader2 className="mr-1 h-3 w-3 animate-spin" /> : <Sparkles className="mr-1 h-3 w-3" />}
+                Extract Tasks
+              </Button>
+              
+              {lastObservation && (
+                <div className="mt-auto rounded bg-zinc-100 p-2 text-[10px] text-muted-foreground dark:bg-zinc-900">
+                  <div className="font-medium mb-1">Last Observation:</div>
+                  {lastObservation}
                 </div>
               )}
             </CardContent>
           </Card>
 
-          {/* Right - Focus Tasks */}
+          {/* Center - Screen Preview */}
+          <Card className="flex flex-col border-zinc-200 dark:border-zinc-800">
+            <CardHeader className="py-2 px-3">
+              <CardTitle className="flex items-center justify-between text-sm font-medium">
+                <span>Screen</span>
+                <span className={`text-[10px] px-2 py-0.5 rounded-full ${
+                  isProductive 
+                    ? "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300"
+                    : "bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300"
+                }`}>
+                  {isProductive ? "Productive" : "Distracted"}
+                </span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="flex flex-1 flex-col gap-2 px-3 pb-3 pt-0">
+              <div className="relative flex-1 overflow-hidden rounded-lg bg-zinc-900">
+                {capturing ? (
+                  <video ref={screenVideoRef} autoPlay playsInline muted className="h-full w-full object-contain" />
+                ) : (
+                  <div className="flex h-full items-center justify-center text-zinc-500">
+                    <div className="text-center">
+                      <Monitor className="mx-auto h-12 w-12 mb-2 opacity-50" />
+                      <p className="text-sm">Click &quot;Screen&quot; to start</p>
+                    </div>
+                  </div>
+                )}
+
+                {capturing && autoMode && (
+                  <div className="absolute top-2 left-2 flex items-center gap-2">
+                    <div className="flex items-center gap-1 rounded-full bg-red-500 px-2 py-0.5 text-[10px] font-medium text-white">
+                      <div className="h-1.5 w-1.5 animate-pulse rounded-full bg-white" />
+                      LIVE
+                    </div>
+                    <div className="rounded-full bg-green-500 px-2 py-0.5 text-[10px] font-medium text-white">
+                      AGENTS ACTIVE
+                    </div>
+                  </div>
+                )}
+
+                {cameraOn && (
+                  <div className="absolute bottom-2 right-2 h-20 w-28 overflow-hidden rounded-lg border-2 border-white shadow-lg">
+                    <video ref={cameraVideoRef} autoPlay playsInline muted className="h-full w-full object-cover" />
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Right - Tasks */}
           <Card className="flex flex-col border-zinc-200 dark:border-zinc-800">
             <CardHeader className="py-2 px-3">
               <CardTitle className="flex items-center gap-1.5 text-sm font-medium">
                 <Target className="h-4 w-4 text-orange-500" />
-                Focus Tasks
+                Daily Objectives
               </CardTitle>
             </CardHeader>
             <CardContent className="flex flex-1 flex-col gap-2 px-3 pb-3 pt-0">
               <div className="flex gap-1">
                 <Input
-                  placeholder="Add task..."
+                  placeholder="Add objective..."
                   className="h-7 text-xs"
-                  value={focusTask}
-                  onChange={(e) => setFocusTask(e.target.value)}
+                  value={newTask}
+                  onChange={(e) => setNewTask(e.target.value)}
                   onKeyDown={(e) => e.key === "Enter" && addTask()}
                 />
-                <Button onClick={addTask} size="sm" className="h-7 w-7 p-0 text-sm">
-                  +
-                </Button>
+                <Button onClick={addTask} size="sm" className="h-7 w-7 p-0">+</Button>
               </div>
 
               <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
                 {tasks.length === 0 ? (
-                  <p className="py-6 text-center text-xs text-muted-foreground/60">No tasks yet</p>
+                  <p className="py-8 text-center text-xs text-muted-foreground/60">
+                    Add your daily objectives
+                  </p>
                 ) : (
-                  tasks.map((task, i) => (
+                  tasks.map((task) => (
                     <button
-                      key={i}
-                      onClick={() => toggleTask(i)}
-                      className={`flex w-full items-center gap-2 rounded px-2 py-1 text-left transition-all ${
+                      key={task.id}
+                      onClick={() => toggleTask(task)}
+                      className={`flex w-full items-center gap-2 rounded px-2 py-1.5 text-left transition-all ${
                         task.done
                           ? "bg-green-50 dark:bg-green-950/20"
                           : "bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-900 dark:hover:bg-zinc-800"
                       }`}
                     >
                       {task.done ? (
-                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-green-500" />
+                        <CheckCircle2 className="h-4 w-4 shrink-0 text-green-500" />
                       ) : (
-                        <Circle className="h-3.5 w-3.5 shrink-0 text-muted-foreground/40" />
+                        <Circle className="h-4 w-4 shrink-0 text-muted-foreground/40" />
                       )}
-                      <span className={`text-xs ${task.done ? "text-muted-foreground line-through" : "text-foreground"}`}>
+                      <span className={`text-xs ${task.done ? "text-muted-foreground line-through" : ""}`}>
                         {task.text}
                       </span>
                     </button>
@@ -578,18 +571,8 @@ export default function Home() {
               </div>
 
               {tasks.length > 0 && (
-                <div className="flex items-center justify-between border-t border-zinc-100 pt-1.5 dark:border-zinc-800">
-                  <span className="text-[10px] text-muted-foreground">
-                    {tasks.filter((t) => t.done).length}/{tasks.length}
-                  </span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-5 text-[10px] text-muted-foreground hover:text-destructive"
-                    onClick={() => setTasks(tasks.filter((t) => !t.done))}
-                  >
-                    Clear
-                  </Button>
+                <div className="border-t border-zinc-100 pt-2 text-center text-[10px] text-muted-foreground dark:border-zinc-800">
+                  {tasks.filter((t) => t.done).length}/{tasks.length} completed
                 </div>
               )}
             </CardContent>

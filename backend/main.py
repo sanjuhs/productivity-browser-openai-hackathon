@@ -8,6 +8,7 @@ Three agents:
 """
 
 import base64
+import io
 import json
 import logging
 import os
@@ -22,8 +23,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from openai import OpenAI
 from pydantic import BaseModel
 
@@ -43,8 +45,8 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 CONFIG = {
     "observer_interval_seconds": 30,        # 30-second agent
     "compaction_interval_seconds": 1800,    # 30-minute agent (1800s = 30min)
-    "manager_min_interval_seconds": 45,     # Manager random min
-    "manager_max_interval_seconds": 60,     # Manager random max
+    "manager_min_interval_seconds": 115,    # Manager random min (~2 min)
+    "manager_max_interval_seconds": 125,    # Manager random max (~2 min)
 }
 # ============================================================
 
@@ -116,6 +118,28 @@ def init_db():
         )
     """)
     
+    # Focus policy strikes (accumulate within 30-min window, reset by compaction if ≤3)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS focus_strikes (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            strike_count INTEGER DEFAULT 0,
+            window_start TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    
+    # Migration: add window_start column if it doesn't exist (for existing DBs)
+    cursor = conn.execute("PRAGMA table_info(focus_strikes)")
+    columns = [row[1] for row in cursor.fetchall()]
+    if "window_start" not in columns:
+        conn.execute(f"ALTER TABLE focus_strikes ADD COLUMN window_start TEXT DEFAULT '{datetime.now().isoformat()}'")
+        logger.info("Migrated focus_strikes table: added window_start column")
+    
+    conn.execute(
+        "INSERT OR IGNORE INTO focus_strikes (id, strike_count, window_start, updated_at) VALUES (1, 0, ?, ?)",
+        (datetime.now().isoformat(), datetime.now().isoformat())
+    )
+    
     conn.commit()
     conn.close()
     logger.info(f"Database ready: {DB_PATH}")
@@ -186,6 +210,7 @@ class ManagerResponse(BaseModel):
     reasoning: str
     interjection: bool
     interjection_message: str | None
+    strike_count: int = 1  # 1–3, for TTS tone escalation
     tasks_updated: list[str]
     elapsed_ms: float
 
@@ -204,6 +229,34 @@ class InterjectionResponse(BaseModel):
     has_interjection: bool
     message: str | None
     timestamp: str | None
+    strike_count: int | None = None
+
+
+class InterjectionSpeechRequest(BaseModel):
+    message: str
+    strike_count: int = 1  # 1–3
+
+
+class AssessTaskCompletionRequest(BaseModel):
+    transcript: str
+    task_list: list[TaskItem]
+
+
+class AssessTaskCompletionResponse(BaseModel):
+    tasks_to_complete: list[str]  # exact task text to mark done
+    is_compliant: bool = True  # did developer show progress?
+    compliance_message: str | None = None
+
+
+class NonComplianceSpeechRequest(BaseModel):
+    strike_count: int = 1
+    tasks_remaining: int = 0
+
+
+class StrikeStatusResponse(BaseModel):
+    strike_count: int
+    window_start: str
+    is_force_redirect_mode: bool  # True if strikes >= 3
 
 
 class ConfigResponse(BaseModel):
@@ -496,6 +549,30 @@ Be factual and descriptive. This summary will be used by a manager agent to asse
     
     total_time = (time.perf_counter() - start) * 1000
     
+    # Reset strike count if ≤3 in this 30-min window, else keep accumulating
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    strike_row = conn.execute("SELECT strike_count, window_start FROM focus_strikes WHERE id = 1").fetchone()
+    current_strikes = strike_row["strike_count"] if strike_row else 0
+    
+    if current_strikes <= 3:
+        # Good behavior - reset strikes and start new window
+        conn.execute(
+            "UPDATE focus_strikes SET strike_count = 0, window_start = ?, updated_at = ? WHERE id = 1",
+            (datetime.now().isoformat(), datetime.now().isoformat())
+        )
+        logger.info(f"  Strikes: {current_strikes}/3 in window → RESET (good behavior)")
+    else:
+        # Bad behavior - keep strikes, just update window_start for next period
+        conn.execute(
+            "UPDATE focus_strikes SET window_start = ?, updated_at = ? WHERE id = 1",
+            (datetime.now().isoformat(), datetime.now().isoformat())
+        )
+        logger.info(f"  Strikes: {current_strikes}/3 in window → KEPT (needs improvement)")
+    
+    conn.commit()
+    conn.close()
+    
     logger.info(f"  Apps: {', '.join(apps_seen)}")
     logger.info(f"  API: {api_time:.0f}ms | Total: {total_time:.0f}ms")
     logger.info(f"  Summary: {summary[:100]}...")
@@ -639,24 +716,31 @@ Assess the user's productivity and decide if an interjection is needed."""
         conn.commit()
         conn.close()
     
-    # Handle interjection
+    # Handle interjection: get/increment strike (capped at 3), save pending
+    strike_count = 0
     if interjection and interjection_message:
-        logger.info("")
-        logger.info("🚨 " + "=" * 36 + " 🚨")
-        logger.info("🚨        INTERJECTION            🚨")
-        logger.info("🚨 " + "=" * 36 + " 🚨")
-        logger.info(f"   {interjection_message}")
-        logger.info("🚨 " + "=" * 36 + " 🚨")
-        logger.info("")
-        
-        # Save pending interjection for frontend
         conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT strike_count FROM focus_strikes WHERE id = 1").fetchone()
+        current = (row["strike_count"] if row else 0)
+        strike_count = min(3, current + 1)  # Cap at 3
+        conn.execute(
+            "UPDATE focus_strikes SET strike_count = ?, updated_at = ? WHERE id = 1",
+            (strike_count, datetime.now().isoformat())
+        )
         conn.execute(
             "INSERT INTO pending_interjections (timestamp, message, acknowledged) VALUES (?, ?, 0)",
             (datetime.now().isoformat(), interjection_message)
         )
         conn.commit()
         conn.close()
+        logger.info("")
+        logger.info("🚨 " + "=" * 36 + " 🚨")
+        logger.info("🚨        INTERJECTION            🚨")
+        logger.info("🚨 " + "=" * 36 + " 🚨")
+        logger.info(f"   Strike {strike_count}/3: {interjection_message}")
+        logger.info("🚨 " + "=" * 36 + " 🚨")
+        logger.info("")
     
     # Save manager decision
     conn = sqlite3.connect(DB_PATH)
@@ -694,6 +778,7 @@ Assess the user's productivity and decide if an interjection is needed."""
         reasoning=reasoning,
         interjection=interjection,
         interjection_message=interjection_message,
+        strike_count=strike_count if interjection else 0,
         tasks_updated=tasks_updated,
         elapsed_ms=round(total_time, 1)
     )
@@ -712,6 +797,8 @@ def check_interjection():
     pending = conn.execute(
         "SELECT id, timestamp, message FROM pending_interjections WHERE acknowledged = 0 ORDER BY id DESC LIMIT 1"
     ).fetchone()
+    strike_row = conn.execute("SELECT strike_count FROM focus_strikes WHERE id = 1").fetchone()
+    strike_count = strike_row["strike_count"] if strike_row else 0
     
     conn.close()
     
@@ -719,19 +806,299 @@ def check_interjection():
         return InterjectionResponse(
             has_interjection=True,
             message=pending["message"],
-            timestamp=pending["timestamp"]
+            timestamp=pending["timestamp"],
+            strike_count=strike_count
         )
-    return InterjectionResponse(has_interjection=False, message=None, timestamp=None)
+    return InterjectionResponse(has_interjection=False, message=None, timestamp=None, strike_count=None)
 
 
 @app.post("/api/interjection/acknowledge")
 def acknowledge_interjection():
-    """Acknowledge all pending interjections"""
+    """Acknowledge pending interjections (strikes are NOT reset - only compaction resets them)"""
     conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
     conn.execute("UPDATE pending_interjections SET acknowledged = 1 WHERE acknowledged = 0")
+    # Get current strike count for response (but don't reset it)
+    row = conn.execute("SELECT strike_count FROM focus_strikes WHERE id = 1").fetchone()
+    strike_count = row["strike_count"] if row else 0
     conn.commit()
     conn.close()
-    return {"status": "acknowledged"}
+    return {"status": "acknowledged", "strike_count": strike_count}
+
+
+# ============================================================
+# Interjection TTS + voice response + task assessment
+# ============================================================
+
+# Tone escalation: strike 1 = gentle, 2 = firm, 3+ = stern (no voice input, just redirect)
+def _interjection_script(message: str, strike_count: int) -> str:
+    strike_count = max(1, min(3, strike_count))  # Cap at 3
+    if strike_count == 1:
+        intro = "Hey. "
+        outro = " How much of the work have you completed from your task list? Please tell me which tasks you've finished."
+    elif strike_count == 2:
+        intro = "Listen. This is the second time. "
+        outro = " How much of the work have you completed from your task list? Tell me which tasks are done."
+    else:  # strike_count >= 3 - stern, no voice input requested
+        # Don't include the original message - just be stern and redirect
+        return "Enough is enough. You've spent too much time in this 30-minute window on unproductive platforms. I'm sending you back to work. No more distractions. Focus. Now."
+    return intro + message + outro
+
+
+def _strike_label(strike_count: int) -> str:
+    """Return human-readable strictness label for logging."""
+    if strike_count <= 1:
+        return "gentle"
+    elif strike_count == 2:
+        return "firm"
+    else:
+        return "stern (force redirect)"
+
+
+@app.get("/api/strike-status", response_model=StrikeStatusResponse)
+def get_strike_status():
+    """Get current strike count and whether we're in force-redirect mode"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT strike_count, window_start FROM focus_strikes WHERE id = 1").fetchone()
+    conn.close()
+    
+    strike_count = row["strike_count"] if row else 0
+    window_start = row["window_start"] if row else datetime.now().isoformat()
+    
+    return StrikeStatusResponse(
+        strike_count=strike_count,
+        window_start=window_start,
+        is_force_redirect_mode=strike_count >= 3
+    )
+
+
+@app.post("/api/interjection-speech")
+def interjection_speech(req: InterjectionSpeechRequest):
+    """Generate TTS audio for interjection message with strike-based tone. Returns MP3."""
+    strike_count = max(1, min(3, req.strike_count))  # Cap at 3
+    logger.info("")
+    logger.info("🔊 TTS INTERJECTION")
+    logger.info("─" * 40)
+    logger.info(f"  Strike: {strike_count}/3 ({_strike_label(strike_count)})")
+    logger.info(f"  Message: {req.message[:80]}..." if len(req.message) > 80 else f"  Message: {req.message}")
+    logger.info("─" * 40)
+    script = _interjection_script(req.message, strike_count)
+    try:
+        response = client.audio.speech.create(
+            model="tts-1",
+            voice="onyx",
+            input=script,
+            response_format="mp3",
+        )
+        audio_bytes = response.content
+        return Response(content=audio_bytes, media_type="audio/mpeg")
+    except Exception as e:
+        logger.error(f"TTS failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _non_compliance_script(strike_count: int, tasks_remaining: int) -> str:
+    """Generate escalating TTS message for non-compliant developer"""
+    strike_count = max(1, min(10, strike_count))  # Allow higher for repeated non-compliance
+    tasks_text = f"You still have {tasks_remaining} task{'s' if tasks_remaining != 1 else ''} remaining." if tasks_remaining > 0 else ""
+    
+    if strike_count <= 2:
+        return f"""I notice you haven't made progress on your tasks. {tasks_text}
+        
+Let me remind you: staying focused helps you finish faster and feel accomplished. 
+Every completed task is a win. Let's get back to work and knock out those remaining items."""
+    
+    elif strike_count <= 4:
+        return f"""This is concerning. You're not making progress and continue to be distracted. {tasks_text}
+        
+Here's the reality: every minute you waste now is a minute you'll regret later. 
+Your future self is counting on you. Stop procrastinating. Open Cursor. Start working. Now."""
+    
+    else:
+        return f"""I've asked you multiple times now. This is unacceptable. {tasks_text}
+        
+You made a commitment to complete these tasks. Breaking that commitment has consequences:
+- You fall behind schedule
+- Stress accumulates  
+- Quality suffers
+- Trust erodes
+
+I'm switching you back to work. You will stay focused. No more excuses. Get. It. Done."""
+
+
+@app.post("/api/non-compliance-speech")
+def non_compliance_speech(req: NonComplianceSpeechRequest):
+    """Generate escalating TTS for non-compliant developer. Returns MP3."""
+    logger.info("")
+    logger.info("🚨 NON-COMPLIANCE TTS")
+    logger.info("─" * 40)
+    logger.info(f"  Strike: {req.strike_count} | Tasks remaining: {req.tasks_remaining}")
+    logger.info("─" * 40)
+    
+    script = _non_compliance_script(req.strike_count, req.tasks_remaining)
+    try:
+        response = client.audio.speech.create(
+            model="tts-1",
+            voice="onyx",
+            input=script,
+            response_format="mp3",
+        )
+        audio_bytes = response.content
+        return Response(content=audio_bytes, media_type="audio/mpeg")
+    except Exception as e:
+        logger.error(f"Non-compliance TTS failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/transcribe")
+def transcribe_audio(file: UploadFile = File(...)):
+    """Transcribe user voice response (e.g. progress update). Returns { text }."""
+    if not file.content_type or not file.content_type.startswith("audio/"):
+        raise HTTPException(status_code=400, detail="Expected an audio file")
+    try:
+        # OpenAI expects a file-like object; ensure we have bytes
+        contents = file.file.read()
+        if not contents:
+            raise HTTPException(status_code=400, detail="Empty audio file")
+        audio_file = io.BytesIO(contents)
+        audio_file.name = file.filename or "audio.webm"
+        transcript = client.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_file,
+            response_format="text",
+        )
+        text = transcript if isinstance(transcript, str) else getattr(transcript, "text", "") or ""
+        return {"text": text}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Transcribe failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+def _strip_task_prefix(s: str) -> str:
+    """Strip '[ ] ' or '[x] ' prefix so we match plain task text in DB."""
+    s = (str(s) if s is not None else "").strip()
+    for prefix in ("[x] ", "[ ] ", "[x]", "[ ]"):
+        if s.startswith(prefix):
+            s = s[len(prefix) :].strip()
+            break
+    return s
+
+
+@app.post("/api/assess-task-completion", response_model=AssessTaskCompletionResponse)
+def assess_task_completion(req: AssessTaskCompletionRequest):
+    """From user's voice transcript, determine which tasks to mark done and assess compliance."""
+    pending_tasks = [t for t in req.task_list if not t.done]
+    
+    if not req.transcript.strip():
+        return AssessTaskCompletionResponse(
+            tasks_to_complete=[],
+            is_compliant=False,
+            compliance_message="No response detected"
+        )
+    
+    # Build numbered task list for clearer LLM matching
+    task_entries = []
+    for i, t in enumerate(req.task_list, 1):
+        status = "[DONE]" if t.done else "[PENDING]"
+        task_entries.append(f"{i}. {status} {t.text}")
+    tasks_str = "\n".join(task_entries) if task_entries else "No tasks"
+    
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": """You are assessing a developer's spoken progress report.
+
+IMPORTANT: The developer is telling you which tasks they have ALREADY FINISHED (past tense).
+You must identify ONLY the tasks they explicitly claim to have completed.
+
+Given the numbered task list and the user's transcript, determine:
+1. Which specific tasks (by number) they said they have ALREADY COMPLETED
+2. Whether they are being cooperative (compliant) or making excuses (non-compliant)
+
+Respond in JSON:
+{
+  "completed_task_numbers": [1, 3, ...],
+  "is_compliant": true/false,
+  "compliance_reason": "brief explanation"
+}
+
+Rules for "completed_task_numbers":
+- ONLY include tasks the user EXPLICITLY said they finished/completed/done
+- Do NOT include tasks they say they "will do" or "are working on"
+- Do NOT include tasks just because the user mentions them
+- If user says "I haven't done anything" or refuses, return empty array []
+- If user mentions completing a task, include its NUMBER from the list
+
+Rules for "is_compliant":
+- TRUE if: they report completing tasks, OR acknowledge work remaining, OR commit to work
+- FALSE if: they refuse, make excuses, are dismissive, or won't engage""",
+            },
+            {
+                "role": "user",
+                "content": f"Task list:\n{tasks_str}\n\nDeveloper said: \"{req.transcript}\"",
+            },
+        ],
+        response_format={"type": "json_object"},
+    )
+    raw = response.choices[0].message.content
+    result = json.loads(raw)
+    
+    logger.info(f"[Assessment] LLM response: {raw}")
+    
+    completed_task_numbers = result.get("completed_task_numbers", [])
+    is_compliant = result.get("is_compliant", True)
+    compliance_reason = result.get("compliance_reason", "")
+    
+    if not isinstance(completed_task_numbers, list):
+        completed_task_numbers = []
+    
+    # Convert task numbers to task text (1-indexed)
+    tasks_to_complete = []
+    for num in completed_task_numbers:
+        try:
+            idx = int(num) - 1  # Convert to 0-indexed
+            if 0 <= idx < len(req.task_list):
+                task = req.task_list[idx]
+                if not task.done:  # Only mark if not already done
+                    tasks_to_complete.append(task.text)
+        except (ValueError, TypeError):
+            continue
+    
+    logger.info(f"[Assessment] Task numbers: {completed_task_numbers} -> Tasks to mark done: {tasks_to_complete}")
+    
+    # Mark those tasks done in DB using EXACT match
+    if tasks_to_complete:
+        conn = sqlite3.connect(DB_PATH)
+        for task_text in tasks_to_complete:
+            # Use exact match, not LIKE
+            conn.execute(
+                "UPDATE tasks SET done = 1 WHERE text = ? AND done = 0",
+                (task_text,)
+            )
+        conn.commit()
+        conn.close()
+    
+    # Determine compliance message
+    if tasks_to_complete:
+        compliance_message = f"Completed {len(tasks_to_complete)} task(s)"
+        is_compliant = True  # If they completed tasks, they're compliant
+    elif not is_compliant and len(pending_tasks) > 0:
+        compliance_message = compliance_reason or "No progress reported on pending tasks"
+    else:
+        compliance_message = compliance_reason or "Response acknowledged"
+    
+    logger.info(f"[Assessment] Final: Compliant={is_compliant} | Completed={len(tasks_to_complete)} | Reason={compliance_message}")
+    
+    return AssessTaskCompletionResponse(
+        tasks_to_complete=tasks_to_complete,
+        is_compliant=is_compliant,
+        compliance_message=compliance_message
+    )
 
 
 # ============================================================
@@ -776,12 +1143,16 @@ def get_decisions(limit: int = 20):
 
 @app.delete("/api/history")
 def clear_history():
-    """Clear all history"""
+    """Clear all history and reset focus strikes"""
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM observations")
     conn.execute("DELETE FROM compactions")
     conn.execute("DELETE FROM manager_decisions")
     conn.execute("DELETE FROM pending_interjections")
+    conn.execute(
+        "UPDATE focus_strikes SET strike_count = 0, window_start = ?, updated_at = ? WHERE id = 1",
+        (datetime.now().isoformat(), datetime.now().isoformat())
+    )
     conn.commit()
     conn.close()
     logger.info("All history cleared")

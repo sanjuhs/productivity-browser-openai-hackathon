@@ -22,6 +22,9 @@ import {
   Pause,
   AlertTriangle,
   Laptop,
+  Mic,
+  MicOff,
+  Volume2,
 } from "lucide-react";
 
 const API_URL = "http://localhost:8000";
@@ -49,8 +52,23 @@ export default function Home() {
   const [lastObservation, setLastObservation] = useState<string>("");
   const [isProductive, setIsProductive] = useState(true);
   
-  // Interjection popup
+  // Interjection popup: message, strike (1–3), phase (alert → listening → non-compliance → ready)
   const [interjection, setInterjection] = useState<string | null>(null);
+  const [interjectionStrikeCount, setInterjectionStrikeCount] = useState(1);
+  const [interjectionPhase, setInterjectionPhase] = useState<"alert" | "listening" | "non-compliance" | "ready">("alert");
+  const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
+  const [micPermission, setMicPermission] = useState<"granted" | "denied" | "prompt" | "unknown">("unknown");
+  const [screenPermission, setScreenPermission] = useState<"granted" | "prompt" | "unknown">("unknown");
+  const [isForceRedirectMode, setIsForceRedirectMode] = useState(false); // True when strikes >= 3
+  const [nonComplianceCount, setNonComplianceCount] = useState(0); // Track consecutive non-compliance
+  const interjectionActiveRef = useRef(false); // Prevent overlapping interjections
+  const interjectionTtsPlayedRef = useRef(false);
+  const nonComplianceTtsPlayedRef = useRef(false);
+  const ttsPlaybackIdRef = useRef(0); // tie onended to current playback so stale callbacks no-op
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
 
   const screenVideoRef = useRef<HTMLVideoElement>(null);
   const cameraVideoRef = useRef<HTMLVideoElement>(null);
@@ -66,7 +84,94 @@ export default function Home() {
   const titleIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const originalTitle = useRef("Multi-Agent Productivity");
 
-  // Load tasks from backend on mount
+  // Check microphone permission status
+  const checkMicPermission = useCallback(async (): Promise<"granted" | "denied" | "prompt" | "unknown"> => {
+    try {
+      // Try Permissions API first (Chrome, Edge)
+      if (navigator.permissions?.query) {
+        const result = await navigator.permissions.query({ name: "microphone" as PermissionName });
+        const status = result.state as "granted" | "denied" | "prompt";
+        setMicPermission(status);
+        console.log("[Permissions] Mic permission:", status);
+        return status;
+      }
+    } catch {
+      // Firefox/Safari don't support microphone query
+    }
+    // Fallback: try to enumerate devices — if we get labeled devices, permission is granted
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const audioInputs = devices.filter((d) => d.kind === "audioinput");
+      // If we have labels, permission was previously granted
+      const hasLabels = audioInputs.some((d) => d.label);
+      if (hasLabels) {
+        setMicPermission("granted");
+        return "granted";
+      }
+      // No labels means either prompt or denied — we'll treat as prompt
+      setMicPermission("prompt");
+      return "prompt";
+    } catch {
+      setMicPermission("unknown");
+      return "unknown";
+    }
+  }, []);
+
+  // Request microphone permission explicitly
+  const requestMicPermission = useCallback(async (): Promise<boolean> => {
+    setMicError(null);
+    try {
+      console.log("[Permissions] Requesting mic permission...");
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Permission granted — stop the test stream immediately
+      stream.getTracks().forEach((t) => t.stop());
+      setMicPermission("granted");
+      console.log("[Permissions] Mic permission granted");
+      return true;
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      console.error("[Permissions] Mic request failed:", err.name, err.message);
+      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+        setMicPermission("denied");
+        setMicError(
+          "Microphone permission denied. Click the lock icon in your browser's address bar, allow microphone access for this site, then reload the page."
+        );
+        return false;
+      }
+      if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
+        // Permission granted at browser level but macOS is blocking — need to enable in System Settings
+        setMicPermission("granted");
+        setMicError(
+          "No microphone detected. This is usually a macOS privacy issue. Go to System Settings → Privacy & Security → Microphone, and enable your browser. Then reload this page."
+        );
+        return false;
+      }
+      setMicPermission("unknown");
+      setMicError(err.message || "Failed to access microphone.");
+      return false;
+    }
+  }, []);
+
+  // Pre-flight check: verify all required permissions before starting agents
+  const checkPermissionsPreFlight = useCallback(async (): Promise<{ mic: boolean; screen: boolean }> => {
+    console.log("[PreFlight] Checking permissions...");
+    const micStatus = await checkMicPermission();
+    let micOk = micStatus === "granted";
+    
+    // If mic is prompt/unknown, request it now
+    if (!micOk && micStatus !== "denied") {
+      micOk = await requestMicPermission();
+    }
+    
+    // Screen capture permission can only be checked by attempting capture
+    // We'll mark it as "unknown" until user starts capture
+    const screenOk = screenPermission === "granted" || capturing;
+    
+    console.log("[PreFlight] Results — mic:", micOk ? "OK" : "FAILED", "| screen:", screenOk ? "OK" : "needs capture");
+    return { mic: micOk, screen: screenOk };
+  }, [checkMicPermission, requestMicPermission, screenPermission, capturing]);
+
+  // Load tasks from backend on mount + check permissions
   useEffect(() => {
     fetch(`${API_URL}/api/tasks`)
       .then((res) => res.json())
@@ -77,11 +182,35 @@ export default function Home() {
     if ("Notification" in window && Notification.permission === "default") {
       Notification.requestPermission();
     }
-  }, []);
 
-  // Trigger interjection - grabs user attention
-  const triggerInterjection = useCallback(async (message: string) => {
+    // Check mic permission on mount (non-blocking)
+    checkMicPermission();
+  }, [checkMicPermission]);
+
+  // Trigger interjection - grabs user attention; strikeCount capped at 3
+  const triggerInterjection = useCallback(async (message: string, strikeCount: number = 1) => {
+    // Prevent overlapping interjections
+    if (interjectionActiveRef.current) {
+      console.log("[Interjection] Skipped - another interjection is already active");
+      return;
+    }
+    interjectionActiveRef.current = true;
+    
+    const cappedStrike = Math.min(3, Math.max(1, strikeCount));
     setInterjection(message);
+    setInterjectionStrikeCount(cappedStrike);
+    interjectionTtsPlayedRef.current = false;
+    nonComplianceTtsPlayedRef.current = false;
+    setNonComplianceCount(0);
+    setInterjectionPhase("alert"); // Always start with TTS
+    
+    // At strike 3+: force redirect mode - TTS plays but no voice input
+    if (cappedStrike >= 3) {
+      setIsForceRedirectMode(true);
+      console.log("[Interjection] Strike 3 - Force redirect mode: TTS will play, then auto-redirect (no voice input)");
+    } else {
+      setIsForceRedirectMode(false);
+    }
 
     // 1. Play alert sound (beep)
     try {
@@ -103,7 +232,7 @@ export default function Home() {
     // 2. Desktop notification
     if ("Notification" in window && Notification.permission === "granted") {
       new Notification("🚨 Focus Check!", {
-        body: message,
+        body: cappedStrike >= 3 ? "Get back to work NOW!" : message,
         icon: "/favicon.ico",
         requireInteraction: true,
       });
@@ -130,6 +259,132 @@ export default function Home() {
       }
     }
   }, []);
+
+  // Strike level labels for logging/UI
+  const strikeLabel = (n: number) => {
+    if (n <= 1) return "gentle";
+    if (n === 2) return "firm";
+    if (n === 3) return "strict";
+    return "maximum enforcement";
+  };
+
+  // When interjection modal is in "alert" phase, play TTS once
+  // Strike 1-2: transition to "listening" for voice input
+  // Strike 3+: transition to "ready" (no voice input, just force redirect)
+  useEffect(() => {
+    if (!interjection || interjectionPhase !== "alert" || interjectionTtsPlayedRef.current) return;
+    interjectionTtsPlayedRef.current = true;
+    const playbackId = ++ttsPlaybackIdRef.current; // so only this playback's onended updates phase
+    const strike = Math.max(1, Math.min(3, interjectionStrikeCount));
+    const forceRedirect = strike >= 3;
+    console.log(`[Interjection TTS] Strike ${strike}/3 (${strikeLabel(strike)}) — playing message${forceRedirect ? " (force redirect after)" : ""}`);
+    
+    (async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/interjection-speech`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            message: interjection,
+            strike_count: interjectionStrikeCount,
+          }),
+        });
+        if (!res.ok) throw new Error("TTS failed");
+        const blob = await res.blob();
+        if (playbackId !== ttsPlaybackIdRef.current) return; // superseded by newer interjection
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          if (playbackId !== ttsPlaybackIdRef.current) return; // stale callback, ignore
+          setMicError(null);
+          if (forceRedirect) {
+            // Strike 3+: skip voice input, go straight to ready
+            console.log("[Interjection TTS] Strike 3+ — skipping voice input, forcing redirect");
+            setInterjectionPhase("ready");
+          } else {
+            // Strike 1-2: allow voice input
+            setInterjectionPhase("listening");
+          }
+        };
+        audio.onerror = () => {
+          URL.revokeObjectURL(url);
+          if (playbackId !== ttsPlaybackIdRef.current) return;
+          setMicError(null);
+          setInterjectionPhase(forceRedirect ? "ready" : "listening");
+        };
+        await audio.play();
+      } catch (e) {
+        console.error("TTS error:", e);
+        if (playbackId !== ttsPlaybackIdRef.current) return;
+        setMicError(null);
+        setInterjectionPhase(forceRedirect ? "ready" : "listening");
+      }
+    })();
+  }, [interjection, interjectionPhase, interjectionStrikeCount]);
+
+  // When in "non-compliance" phase, play escalating TTS then force redirect
+  useEffect(() => {
+    if (!interjection || interjectionPhase !== "non-compliance" || nonComplianceTtsPlayedRef.current) return;
+    nonComplianceTtsPlayedRef.current = true;
+    const playbackId = ++ttsPlaybackIdRef.current;
+    const pendingTasks = tasks.filter((t) => !t.done).length;
+    
+    console.log(`[Non-compliance TTS] Strike ${interjectionStrikeCount}, non-compliance #${nonComplianceCount}`);
+    
+    (async () => {
+      try {
+        const res = await fetch(`${API_URL}/api/non-compliance-speech`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            strike_count: interjectionStrikeCount + nonComplianceCount,
+            tasks_remaining: pendingTasks,
+          }),
+        });
+        if (!res.ok) throw new Error("Non-compliance TTS failed");
+        const blob = await res.blob();
+        if (playbackId !== ttsPlaybackIdRef.current) return;
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        audio.onended = async () => {
+          URL.revokeObjectURL(url);
+          if (playbackId !== ttsPlaybackIdRef.current) return;
+          
+          // Force redirect to productivity app
+          if (localModeRef.current) {
+            try {
+              await fetch(`${API_URL}/api/focus-productive-app`, { method: "POST" });
+              console.log("[Non-compliance] Force switched to productive app");
+            } catch {
+              console.log("[Non-compliance] Could not force switch");
+            }
+          }
+          
+          // If strikes >= 3 or many non-compliance events, keep them locked
+          if (interjectionStrikeCount >= 3 || nonComplianceCount >= 2) {
+            setIsForceRedirectMode(true);
+            // Loop back to listening for another chance
+            setInterjectionPhase("listening");
+            setMicError("You must report progress or commit to working. Try again.");
+          } else {
+            // Give them a chance to acknowledge
+            setInterjectionPhase("ready");
+          }
+        };
+        audio.onerror = () => {
+          URL.revokeObjectURL(url);
+          if (playbackId !== ttsPlaybackIdRef.current) return;
+          setInterjectionPhase("ready");
+        };
+        await audio.play();
+      } catch (e) {
+        console.error("Non-compliance TTS error:", e);
+        if (playbackId !== ttsPlaybackIdRef.current) return;
+        setInterjectionPhase("ready");
+      }
+    })();
+  }, [interjection, interjectionPhase, interjectionStrikeCount, nonComplianceCount, tasks]);
 
   // Dark mode
   useEffect(() => {
@@ -226,6 +481,7 @@ export default function Home() {
       const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
       screenStreamRef.current = stream;
       setCapturing(true);
+      setScreenPermission("granted");
       stream.getVideoTracks()[0].onended = () => {
         setCapturing(false);
         screenStreamRef.current = null;
@@ -233,6 +489,8 @@ export default function Home() {
       };
     } catch (e) {
       console.error("Screen capture failed:", e);
+      // User cancelled or denied screen sharing
+      setScreenPermission("prompt");
     }
   };
 
@@ -290,8 +548,21 @@ export default function Home() {
     }
   }, [capturing]);
 
-  // Manager Agent (45-60s random)
+  // Manager Agent (~2 min interval)
   const runManager = useCallback(async () => {
+    // Skip if an interjection is already active (prevent overlap)
+    if (interjectionActiveRef.current) {
+      console.log("[Manager] Skipped - interjection already active");
+      // Still schedule next check
+      if (autoModeRef.current) {
+        const intervalRes = await fetch(`${API_URL}/api/next-manager-interval`);
+        const { interval_seconds } = await intervalRes.json();
+        console.log(`Manager: scheduling next check in ${interval_seconds}s (skipped current)`);
+        managerRef.current = setTimeout(runManager, interval_seconds * 1000);
+      }
+      return;
+    }
+    
     setManagerStatus("Checking...");
     try {
       const res = await fetch(`${API_URL}/api/manager`, {
@@ -303,9 +574,9 @@ export default function Home() {
       setIsProductive(data.is_productive);
       setManagerStatus(data.is_productive ? "✓ Productive" : "⚠ Distracted");
 
-      // Show interjection popup directly if Manager says so
+      // Show interjection popup directly if Manager says so (pass strike_count for TTS tone)
       if (data.interjection && data.interjection_message) {
-        triggerInterjection(data.interjection_message);
+        triggerInterjection(data.interjection_message, data.strike_count ?? 1);
       }
 
       // Refresh tasks if any were updated
@@ -326,14 +597,291 @@ export default function Home() {
     }
   }, [triggerInterjection]);
 
+  const startVoiceResponse = async () => {
+    setMicError(null);
+
+    // Step 0: Clean up any stale recording from previous session
+    if (mediaRecorderRef.current) {
+      try {
+        if (mediaRecorderRef.current.state !== "inactive") {
+          mediaRecorderRef.current.stop();
+        }
+        mediaRecorderRef.current.stream?.getTracks().forEach((t) => t.stop());
+      } catch {
+        // Ignore cleanup errors
+      }
+      mediaRecorderRef.current = null;
+    }
+    recordedChunksRef.current = [];
+
+    // Small delay to ensure previous stream is fully released
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Step 1: Check current permission status and enumerate devices for diagnostics
+    const currentPermission = await checkMicPermission();
+    console.log("[Mic] Permission status:", currentPermission);
+
+    // Diagnostic: enumerate all devices at start
+    try {
+      const allDevices = await navigator.mediaDevices.enumerateDevices();
+      const audioIn = allDevices.filter((d) => d.kind === "audioinput");
+      const audioOut = allDevices.filter((d) => d.kind === "audiooutput");
+      const videoIn = allDevices.filter((d) => d.kind === "videoinput");
+      console.log(`[Mic] Devices at start: ${audioIn.length} audio inputs, ${audioOut.length} audio outputs, ${videoIn.length} video inputs`);
+      if (audioIn.length > 0) {
+        console.log("[Mic] Audio inputs:", audioIn.map((d) => d.label || `(unlabeled: ${d.deviceId.slice(0, 8)})`));
+      }
+    } catch (enumErr) {
+      console.warn("[Mic] Initial enumeration failed:", enumErr);
+    }
+
+    // Step 2: If denied, show clear instructions to enable in browser
+    if (currentPermission === "denied") {
+      setMicError(
+        "Microphone permission denied. Click the lock/site settings icon in your browser's address bar, allow microphone access for this site, then reload the page. You can Skip speaking to continue."
+      );
+      return;
+    }
+
+    // Step 3: If prompt/unknown, try to request permission first
+    if (currentPermission === "prompt" || currentPermission === "unknown") {
+      console.log("[Mic] Requesting permission...");
+      const granted = await requestMicPermission();
+      if (!granted) {
+        // requestMicPermission already set the appropriate error
+        return;
+      }
+    }
+
+    // Step 4: Permission granted — now try to get an audio stream with retry logic
+    let stream: MediaStream | null = null;
+    const MAX_RETRIES = 3;
+    const RETRY_DELAY_MS = 500;
+
+    try {
+      for (let attempt = 1; attempt <= MAX_RETRIES && !stream; attempt++) {
+        try {
+          console.log(`[Mic] Attempt ${attempt}/${MAX_RETRIES} — requesting audio stream...`);
+          
+          // Try with different constraints on retries
+          const constraints = attempt === 1 
+            ? { audio: true }
+            : attempt === 2
+              ? { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } }
+              : { audio: { sampleRate: 44100 } };
+          
+          stream = await navigator.mediaDevices.getUserMedia(constraints);
+          console.log("[Mic] Got stream from device");
+          break;
+        } catch (e) {
+          const err = e instanceof DOMException ? e : new DOMException(String(e), "UnknownError");
+          console.warn(`[Mic] Attempt ${attempt} failed:`, err.name, err.message);
+
+          if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+            setMicPermission("denied");
+            throw e;
+          }
+
+          if (attempt < MAX_RETRIES) {
+            // Log device enumeration for debugging
+            try {
+              const devices = await navigator.mediaDevices.enumerateDevices();
+              const audioInputs = devices.filter((d) => d.kind === "audioinput");
+              console.log(`[Mic] Device enumeration: ${audioInputs.length} input(s)`, 
+                audioInputs.map((d) => ({ id: d.deviceId.slice(0, 8), label: d.label || "(no label)" }))
+              );
+            } catch (enumErr) {
+              console.warn("[Mic] Device enumeration failed:", enumErr);
+            }
+            
+            console.log(`[Mic] Waiting ${RETRY_DELAY_MS}ms before retry...`);
+            await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+          } else {
+            // Final attempt failed — check if it's a device issue
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const audioInputs = devices.filter((d) => d.kind === "audioinput" && d.deviceId);
+            
+            if (audioInputs.length === 0) {
+              throw new DOMException("NO_AUDIO_INPUTS", "NotFoundError");
+            } else {
+              // Devices exist but none work — try each one explicitly
+              console.log("[Mic] Trying each device explicitly...");
+              for (const input of audioInputs) {
+                try {
+                  stream = await navigator.mediaDevices.getUserMedia({
+                    audio: { deviceId: { exact: input.deviceId } },
+                  });
+                  console.log("[Mic] Success with device:", input.label || input.deviceId.slice(0, 12));
+                  break;
+                } catch {
+                  console.warn("[Mic] Device failed:", input.label || input.deviceId.slice(0, 8));
+                }
+              }
+              if (!stream) {
+                throw new DOMException("NO_WORKING_DEVICE", "NotFoundError");
+              }
+            }
+          }
+        }
+      }
+
+      if (!stream) {
+        setMicError(
+          "Could not access microphone after multiple attempts. Try reloading the page or check that no other app is using the mic. You can Skip speaking to continue."
+        );
+        return;
+      }
+
+      // Step 5: Start recording
+      const recorder = new MediaRecorder(stream);
+      recordedChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size) recordedChunksRef.current.push(e.data);
+      };
+      recorder.onstop = () => {
+        stream?.getTracks().forEach((t) => t.stop());
+      };
+      recorder.start();
+      mediaRecorderRef.current = recorder;
+      setIsRecording(true);
+      setMicError(null);
+      console.log("[Mic] Recording started successfully");
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      console.error("[Mic] Final error:", err.name, err.message);
+
+      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+        setMicPermission("denied");
+        setMicError(
+          "Microphone permission denied. Click the lock/site settings icon in your browser's address bar, allow microphone access, then reload. You can Skip speaking to continue."
+        );
+      } else if (err.message === "NO_AUDIO_INPUTS") {
+        setMicError(
+          "No microphone detected. This is usually a macOS privacy issue. Go to System Settings → Privacy & Security → Microphone, and make sure your browser is enabled. Then reload this page. You can Skip speaking to continue."
+        );
+      } else if (err.message === "NO_WORKING_DEVICE") {
+        setMicError(
+          "Microphone found but not responding. Try: (1) Check if another app is using the mic, (2) Unplug and replug your mic, (3) Select a different input in System Settings → Sound → Input. You can Skip speaking to continue."
+        );
+      } else {
+        setMicError(
+          `Microphone error: ${err.message || "Unknown error"}. You can Skip speaking to continue.`
+        );
+      }
+    }
+  };
+
+  const stopVoiceResponseAndAssess = async () => {
+    const recorder = mediaRecorderRef.current;
+    if (!recorder || recorder.state !== "recording") return;
+    recorder.stop();
+    mediaRecorderRef.current = null;
+    setIsRecording(false);
+    setIsTranscribing(true);
+    setMicError(null); // Clear previous errors
+    try {
+      await new Promise((r) => setTimeout(r, 300));
+      const blob = new Blob(recordedChunksRef.current, { type: "audio/webm" });
+      recordedChunksRef.current = [];
+      
+      if (blob.size === 0) {
+        throw new Error("No audio recorded. Please try speaking again.");
+      }
+
+      const formData = new FormData();
+      formData.append("file", blob, "response.webm");
+      const transRes = await fetch(`${API_URL}/api/transcribe`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!transRes.ok) {
+        const errorText = await transRes.text().catch(() => "");
+        throw new Error(`Transcription failed: ${transRes.status}${errorText ? ` - ${errorText}` : ""}`);
+      }
+      const { text } = await transRes.json();
+      
+      if (!text?.trim()) {
+        // No response - treat as non-compliant
+        setNonComplianceCount((c) => c + 1);
+        nonComplianceTtsPlayedRef.current = false;
+        setInterjectionPhase("non-compliance");
+        setIsTranscribing(false);
+        return;
+      }
+      
+      if (tasks.length > 0) {
+        const assessRes = await fetch(`${API_URL}/api/assess-task-completion`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ transcript: text, task_list: tasks }),
+        });
+        
+        if (assessRes.ok) {
+          const { tasks_to_complete, is_compliant, compliance_message } = await assessRes.json();
+          
+          if (tasks_to_complete?.length > 0) {
+            // Success - refresh task list
+            const tasksRes = await fetch(`${API_URL}/api/tasks`);
+            setTasks(await tasksRes.json());
+            console.log("[Voice] Marked tasks complete:", tasks_to_complete);
+            setNonComplianceCount(0); // Reset on success
+            setInterjectionPhase("ready");
+          } else if (!is_compliant) {
+            // Non-compliant response - escalate
+            console.log("[Voice] Non-compliant:", compliance_message);
+            setNonComplianceCount((c) => c + 1);
+            nonComplianceTtsPlayedRef.current = false;
+            setInterjectionPhase("non-compliance");
+          } else {
+            // Compliant but no tasks completed (e.g., "I'll get back to work")
+            setMicError(compliance_message || "No tasks completed, but acknowledged.");
+            setNonComplianceCount(0);
+            setInterjectionPhase("ready");
+          }
+        } else {
+          setMicError("Could not assess your progress. Your tasks were not updated.");
+          setInterjectionPhase("ready");
+        }
+      } else {
+        setInterjectionPhase("ready");
+      }
+    } catch (e) {
+      const err = e instanceof Error ? e : new Error(String(e));
+      console.error("Transcribe/assess error:", err);
+      setMicError(err.message || "Failed to process your voice response. Please try again or skip.");
+      setInterjectionPhase("ready");
+    } finally {
+      setIsTranscribing(false);
+    }
+  };
+
   const acknowledgeInterjection = async () => {
+    // Reset local state
     setInterjection(null);
+    setInterjectionPhase("alert");
+    setMicError(null);
+    setNonComplianceCount(0);
+    setIsForceRedirectMode(false);
+    nonComplianceTtsPlayedRef.current = false;
+    interjectionActiveRef.current = false; // Allow new interjections
+    
     // Stop title flashing
     if (titleIntervalRef.current) {
       clearInterval(titleIntervalRef.current);
       titleIntervalRef.current = null;
     }
     document.title = originalTitle.current;
+
+    // Acknowledge on backend (note: strikes are NOT reset - only compaction resets them)
+    try {
+      const res = await fetch(`${API_URL}/api/interjection/acknowledge`, { method: "POST" });
+      const data = await res.json();
+      console.log(`[Acknowledge] Strike count remains: ${data.strike_count}`);
+      // Update local strike count
+      setInterjectionStrikeCount(data.strike_count || 0);
+    } catch (e) {
+      console.log("Acknowledge failed:", e);
+    }
 
     // LOCAL MODE: Switch to productive app (Cursor, VS Code, etc.)
     if (localModeRef.current) {
@@ -350,8 +898,16 @@ export default function Home() {
   };
 
   // Auto mode control
-  const startAutoMode = () => {
+  const startAutoMode = async () => {
     if (!capturing) return;
+
+    // Pre-flight: check and request mic permission (non-blocking, but log status)
+    console.log("[AutoMode] Running pre-flight permission checks...");
+    const { mic } = await checkPermissionsPreFlight();
+    if (!mic) {
+      console.warn("[AutoMode] Microphone not available — voice response will be unavailable during interjections");
+    }
+
     setAutoMode(true);
     autoModeRef.current = true; // Update ref for callbacks
 
@@ -392,18 +948,151 @@ export default function Home() {
 
   return (
     <div className="h-screen overflow-hidden bg-zinc-50 dark:bg-zinc-950 transition-colors">
-      {/* Interjection Popup */}
+      {/* Interjection Popup: TTS → voice response → acknowledge */}
       {interjection && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="mx-4 max-w-md rounded-xl bg-white p-6 shadow-2xl dark:bg-zinc-900">
-            <div className="mb-4 flex items-center gap-3 text-orange-500">
-              <AlertTriangle className="h-8 w-8" />
-              <h2 className="text-xl font-bold">Hey, focus!</h2>
+            <div className="mb-4 flex items-center justify-between gap-3 text-orange-500">
+              <div className="flex items-center gap-3">
+                <AlertTriangle className={`h-8 w-8 ${isForceRedirectMode || interjectionPhase === "non-compliance" ? "text-red-500" : ""}`} />
+                <h2 className="text-xl font-bold">
+                  {interjectionPhase === "alert" && "Hey, focus!"}
+                  {interjectionPhase === "listening" && "Your turn"}
+                  {interjectionPhase === "non-compliance" && "Not acceptable"}
+                  {interjectionPhase === "ready" && (isForceRedirectMode ? "STOP NOW" : "Back to work")}
+                </h2>
+              </div>
+              <div className="flex flex-col items-end gap-1">
+                <span className={`rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                  interjectionStrikeCount >= 3 
+                    ? "bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300" 
+                    : "bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300"
+                }`} title={`TTS strictness: ${strikeLabel(interjectionStrikeCount)}`}>
+                  Strike {interjectionStrikeCount} {interjectionStrikeCount >= 3 && "⚠️"}
+                </span>
+                {isForceRedirectMode && (
+                  <span className="text-xs text-red-500">Force redirect active</span>
+                )}
+              </div>
             </div>
-            <p className="mb-6 text-zinc-700 dark:text-zinc-300">{interjection}</p>
-            <Button onClick={acknowledgeInterjection} className="w-full">
-              Got it, back to work!
-            </Button>
+            <p className="mb-4 text-zinc-700 dark:text-zinc-300">{interjection}</p>
+
+            {interjectionPhase === "alert" && (
+              <p className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
+                <Volume2 className="h-4 w-4" />
+                Playing message…
+              </p>
+            )}
+
+            {interjectionPhase === "listening" && (
+              <div className="mb-4 space-y-3">
+                {micError && (
+                  <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
+                    {micError}
+                  </p>
+                )}
+                <p className="text-sm text-muted-foreground">
+                  How much of the work have you completed? Tell me which tasks you&apos;ve finished.
+                </p>
+                {isTranscribing ? (
+                  <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    Assessing your progress…
+                  </p>
+                ) : isRecording ? (
+                  <Button
+                    variant="destructive"
+                    onClick={stopVoiceResponseAndAssess}
+                    className="w-full"
+                  >
+                    <MicOff className="mr-2 h-4 w-4" />
+                    Done speaking
+                  </Button>
+                ) : micPermission === "denied" ? (
+                  <div className="space-y-2">
+                    <p className="text-sm text-destructive">
+                      Microphone access is blocked. To enable it:
+                    </p>
+                    <ol className="ml-4 list-decimal text-xs text-muted-foreground">
+                      <li>Click the lock/site settings icon in your address bar</li>
+                      <li>Find &quot;Microphone&quot; and set it to &quot;Allow&quot;</li>
+                      <li>Reload this page</li>
+                    </ol>
+                    <Button
+                      variant="outline"
+                      onClick={() => window.location.reload()}
+                      className="w-full"
+                    >
+                      Reload page
+                    </Button>
+                  </div>
+                ) : micError?.includes("macOS") ? (
+                  <div className="space-y-2">
+                    <p className="text-sm text-destructive">
+                      macOS is blocking microphone access. To fix:
+                    </p>
+                    <ol className="ml-4 list-decimal text-xs text-muted-foreground">
+                      <li>Open <strong>System Settings</strong> → <strong>Privacy &amp; Security</strong></li>
+                      <li>Click <strong>Microphone</strong> in the left sidebar</li>
+                      <li>Enable your browser (Chrome, Arc, Safari, etc.)</li>
+                      <li>Reload this page</li>
+                    </ol>
+                    <Button
+                      variant="outline"
+                      onClick={() => window.location.reload()}
+                      className="w-full"
+                    >
+                      Reload page after enabling
+                    </Button>
+                  </div>
+                ) : (
+                  <Button
+                    variant="secondary"
+                    onClick={startVoiceResponse}
+                    className="w-full"
+                  >
+                    <Mic className="mr-2 h-4 w-4" />
+                    {micPermission === "prompt" || micPermission === "unknown" ? "Grant mic access & speak" : "Start speaking"}
+                  </Button>
+                )}
+                {!isForceRedirectMode && (
+                  <Button variant="ghost" size="sm" onClick={() => setInterjectionPhase("ready")} className="w-full text-muted-foreground">
+                    Skip speaking →
+                  </Button>
+                )}
+              </div>
+            )}
+
+            {interjectionPhase === "non-compliance" && (
+              <div className="mb-4 space-y-3">
+                <div className="rounded-md bg-red-100 px-3 py-2 text-sm text-red-800 dark:bg-red-900/30 dark:text-red-200" role="alert">
+                  <p className="font-medium">You haven&apos;t made progress on your tasks.</p>
+                  <p className="mt-1 text-xs">Listening to your explanation...</p>
+                </div>
+                <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Volume2 className="h-4 w-4 animate-pulse" />
+                  Playing message...
+                </p>
+              </div>
+            )}
+
+            {interjectionPhase === "ready" && (
+              <div className="space-y-3">
+                {isForceRedirectMode ? (
+                  <div className="rounded-md bg-red-100 px-3 py-2 text-sm text-red-800 dark:bg-red-900/30 dark:text-red-200" role="alert">
+                    <p className="font-semibold">Strike 3 - Maximum Enforcement</p>
+                    <p className="mt-1">You&apos;ve been distracted too many times. No more chances. Get back to work immediately.</p>
+                  </div>
+                ) : micError ? (
+                  <p className="rounded-md bg-amber-100 px-3 py-2 text-sm text-amber-800 dark:bg-amber-900/30 dark:text-amber-200" role="alert">
+                    {micError}
+                  </p>
+                ) : null}
+                <Button onClick={acknowledgeInterjection} className="w-full">
+                  {isForceRedirectMode ? "Go to work NOW" : "Got it, back to work!"}
+                </Button>
+              </div>
+            )}
           </div>
         </div>
       )}

@@ -1246,6 +1246,51 @@ def acknowledge_interjection():
     return {"status": "acknowledged", "strike_count": strike_count}
 
 
+@app.delete("/api/interjection/clear-pending")
+def clear_pending_interjections():
+    """
+    Force-clear all pending interjections.
+    Use this when the system gets stuck with a stale interjection.
+    """
+    conn = sqlite3.connect(DB_PATH)
+    cleared = conn.execute(
+        "UPDATE pending_interjections SET acknowledged = 1 WHERE acknowledged = 0"
+    ).rowcount
+    conn.commit()
+    conn.close()
+    
+    logger.info("")
+    logger.info("🧹 CLEARED PENDING INTERJECTIONS")
+    logger.info(f"  Cleared: {cleared} interjection(s)")
+    logger.info("─" * 40)
+    
+    return {"status": "cleared", "count": cleared}
+
+
+@app.get("/api/interjection/pending-count")
+def get_pending_interjection_count():
+    """Get count of pending interjections (for debugging)"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    result = conn.execute(
+        "SELECT COUNT(*) as count FROM pending_interjections WHERE acknowledged = 0"
+    ).fetchone()
+    
+    # Also get the oldest pending one for debugging
+    oldest = conn.execute(
+        "SELECT timestamp, message FROM pending_interjections WHERE acknowledged = 0 ORDER BY id ASC LIMIT 1"
+    ).fetchone()
+    conn.close()
+    
+    return {
+        "pending_count": result["count"] if result else 0,
+        "oldest_pending": {
+            "timestamp": oldest["timestamp"] if oldest else None,
+            "message": oldest["message"][:50] + "..." if oldest else None
+        } if oldest else None
+    }
+
+
 # ============================================================
 # Interjection TTS + voice response + task assessment
 # ============================================================
@@ -1296,9 +1341,24 @@ def _get_mood(strike_count: int, is_productive: bool = False, tasks_completed: b
 
 
 def _has_pending_interjection() -> bool:
-    """Check if there's an unacknowledged interjection (prevents overlapping interjections)"""
+    """
+    Check if there's an unacknowledged interjection (prevents overlapping interjections).
+    Auto-clears stale interjections older than 5 minutes to prevent getting stuck.
+    """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    
+    # First, auto-clear stale interjections older than 5 minutes
+    stale_cutoff = (datetime.now() - timedelta(minutes=5)).isoformat()
+    stale_cleared = conn.execute(
+        "UPDATE pending_interjections SET acknowledged = 1 WHERE acknowledged = 0 AND timestamp < ?",
+        (stale_cutoff,)
+    ).rowcount
+    if stale_cleared > 0:
+        conn.commit()
+        logger.info(f"  🧹 Auto-cleared {stale_cleared} stale interjection(s) older than 5 minutes")
+    
+    # Now check for recent pending interjections
     pending = conn.execute(
         "SELECT COUNT(*) as count FROM pending_interjections WHERE acknowledged = 0"
     ).fetchone()

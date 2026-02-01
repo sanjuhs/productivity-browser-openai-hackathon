@@ -76,6 +76,7 @@ export default function Home() {
   const [isResetting, setIsResetting] = useState(false);
   const [sbiBalance, setSbiBalance] = useState<number | null>(null);
   const [blinkitOrderCount, setBlinkitOrderCount] = useState<number>(0);
+  const [pendingInterjectionCount, setPendingInterjectionCount] = useState<number>(0);
   
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
@@ -1016,6 +1017,13 @@ export default function Home() {
         const orders = await blinkitRes.json();
         setBlinkitOrderCount(orders.length);
       }
+      
+      // Fetch pending interjection count
+      const pendingRes = await fetch(`${API_URL}/api/interjection/pending-count`);
+      if (pendingRes.ok) {
+        const pendingData = await pendingRes.json();
+        setPendingInterjectionCount(pendingData.pending_count);
+      }
     } catch (e) {
       console.error("Failed to fetch settings data:", e);
     }
@@ -1074,6 +1082,19 @@ export default function Home() {
       setBlinkitOrderCount(0);
     } catch (e) {
       console.error("Blinkit reset failed:", e);
+    }
+  };
+
+  const handleClearPendingInterjections = async () => {
+    try {
+      const res = await fetch(`${API_URL}/api/interjection/clear-pending`, { method: "DELETE" });
+      if (res.ok) {
+        const data = await res.json();
+        setPendingInterjectionCount(0);
+        alert(`✅ Cleared ${data.count} stuck interjection(s). Manager will resume normally.`);
+      }
+    } catch (e) {
+      console.error("Clear interjections failed:", e);
     }
   };
 
@@ -1382,6 +1403,35 @@ export default function Home() {
                 Clear Order History
               </Button>
             </div>
+            
+            {/* System Status - Pending Interjections */}
+            {pendingInterjectionCount > 0 && (
+              <div className="mb-4 rounded-lg border-2 border-amber-400 dark:border-amber-600 p-4 bg-amber-50 dark:bg-amber-950/20">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 bg-amber-500 rounded-full flex items-center justify-center animate-pulse">
+                      <AlertTriangle className="h-4 w-4 text-white" />
+                    </div>
+                    <div>
+                      <p className="font-semibold text-sm text-amber-700 dark:text-amber-300">Stuck Interjection</p>
+                      <p className="text-xs text-amber-600 dark:text-amber-400">Manager is blocked - clear to resume</p>
+                    </div>
+                  </div>
+                  <span className="text-lg font-bold text-amber-600">
+                    {pendingInterjectionCount} pending
+                  </span>
+                </div>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  onClick={handleClearPendingInterjections}
+                  className="w-full text-xs border-amber-400 text-amber-700 hover:bg-amber-100 dark:border-amber-600 dark:text-amber-300 dark:hover:bg-amber-900/30"
+                >
+                  <RefreshCw className="h-3 w-3 mr-1" />
+                  Clear Stuck Interjections
+                </Button>
+              </div>
+            )}
             
             {/* Task Stats */}
             <div className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-700 p-4">

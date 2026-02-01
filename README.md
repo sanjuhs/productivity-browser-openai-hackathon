@@ -16,7 +16,7 @@
 
 ## What It Does
 
-A **multi-agent AI system** that watches your screen via GPT-4o Vision, assesses your productivity every ~2 minutes, and intervenes with **escalating voice alerts** when you get distracted — from gentle reminders to **forcefully switching your window** back to work. Includes a **carrot & stick** motivation system: get penalized (virtual bank deductions) when distracted, and rewarded (virtual treat orders) when productive.
+A **multi-agent AI system** that watches your screen via GPT-5-mini (vision), assesses your productivity with GPT-5.2 every ~2 minutes, and intervenes with **escalating voice alerts** when you get distracted — from gentle reminders to **forcefully switching your window** back to work. Includes a **carrot & stick** motivation system: get penalized (virtual bank deductions) when distracted, and rewarded (virtual treat orders) when productive.
 
 ---
 
@@ -102,13 +102,13 @@ pnpm dev
 
 ## 📝 Project Write-up
 
-> A multi-agent productivity system with real-time screen monitoring. Three AI agents collaborate: an Observer (GPT-4o Vision every 30s), a Compaction agent (30-min summaries), and a Manager (productivity decisions every ~2min). When distracted, the system speaks to you via TTS and accepts voice responses via Whisper. A 3-strike escalation system goes from gentle reminders to forcefully switching your window back to work. Includes carrot & stick motivation: bank penalties for distraction, rewards for task completion.
+> A multi-agent productivity system with real-time screen monitoring. Three AI agents collaborate: an Observer (GPT-5-mini vision every 30s), a Compaction agent (GPT-5-mini summaries every 30 min), and a Manager (GPT-5.2 reasoning decisions every ~2 min). When distracted, the system speaks to you via TTS and accepts voice responses via Whisper; GPT-4o-mini parses the transcript to mark tasks complete. A 3-strike escalation system goes from gentle reminders to forcefully switching your window back to work, with carrot & stick motivation (penalties + rewards).
 
 ---
 
 ## 🤖 OpenAI Usage Write-up
 
-> **GPT-4o Vision** — Observes screenshots every 30s, extracting app names, window titles, and detailed content descriptions. **GPT-4o** — Powers the Manager agent's productivity decisions using reasoning over observations + tasks. **GPT-4o-mini** — Handles task extraction from brain dumps and voice response assessment. **TTS-1 (Nova voice)** — Generates natural, emotionally-escalating voice alerts. **Whisper-1** — Real-time speech-to-text for hands-free progress reporting. All 5 OpenAI capabilities work in concert.
+> **GPT-5-mini (vision)** — Observes screenshots every 30s, extracting app names, window titles, and detailed content descriptions. **GPT-5.2** — Powers the Manager agent's productivity decisions using reasoning over observations + tasks. **GPT-5-mini (text)** — Handles brain dump → task extraction and 30‑min compaction summaries. **GPT-4o-mini** — Parses voice transcripts to decide task completion/compliance. **TTS-1 (Nova voice)** — Generates natural, emotionally‑escalating voice alerts. **Whisper-1** — Real-time speech-to-text for hands-free progress reporting. All five OpenAI models work in concert.
 
 ---
 
@@ -129,7 +129,7 @@ This system uses **three specialized AI agents** that work in concert, each with
 │   [Base64 encode frame]                                             │
 │            ↓                                                        │
 │   ┌─────────────────────────────────────┐                           │
-│   │         GPT-4o Vision API           │                           │
+│   │        GPT-5-mini Vision API        │                           │
 │   │                                     │                           │
 │   │  System: "You are an observer.      │                           │
 │   │  Describe what you see factually.   │                           │
@@ -148,7 +148,7 @@ This system uses **three specialized AI agents** that work in concert, each with
 
 **Purpose:** Pure observation without judgment. Creates a factual log of what's on screen.
 
-**OpenAI Model:** `gpt-4o` with vision capability
+**OpenAI Model:** `gpt-5-mini` with vision capability
 
 **Key Design Decision:** The Observer never decides if you're productive — it just records facts. This separation of concerns keeps observations unbiased and allows the Manager to make decisions with full context.
 
@@ -167,7 +167,7 @@ This system uses **three specialized AI agents** that work in concert, each with
 │   [Collect 60+ observations from the window]                        │
 │            ↓                                                        │
 │   ┌─────────────────────────────────────┐                           │
-│   │        GPT-4o-mini API              │                           │
+│   │         GPT-5-mini API              │                           │
 │   │                                     │                           │
 │   │  System: "Summarize activity over   │                           │
 │   │  the last 30 minutes."              │                           │
@@ -196,7 +196,7 @@ This system uses **three specialized AI agents** that work in concert, each with
 
 **Purpose:** Memory management. Compresses 30 minutes of granular observations into a digestible summary. Also handles "good behavior" rewards.
 
-**OpenAI Model:** `gpt-4o-mini`
+**OpenAI Model:** `gpt-5-mini`
 
 **Key Design Decision:** The Compaction agent provides long-term context without overwhelming the Manager with 60+ individual observations. It also implements the "forgiveness" mechanism — if you kept your distractions under control (≤3 strikes), you get a fresh start.
 
@@ -216,7 +216,7 @@ This system uses **three specialized AI agents** that work in concert, each with
 │   └── Latest 30-min compaction summary                              │
 │            ↓                                                        │
 │   ┌─────────────────────────────────────┐                           │
-│   │          GPT-4o API                 │                           │
+│   │          GPT-5.2 API                │                           │
 │   │    (Most capable reasoning)         │                           │
 │   │                                     │                           │
 │   │  System: "You are the Manager.      │                           │
@@ -256,7 +256,7 @@ This system uses **three specialized AI agents** that work in concert, each with
 
 **Purpose:** The decision-maker. Weighs observations against your task list and decides when to intervene.
 
-**OpenAI Model:** `gpt-4o` (most capable model for complex reasoning)
+**OpenAI Model:** `gpt-5.2` (most capable model for complex reasoning)
 
 **Key Design Decision:** The Manager uses randomized intervals (15-25s) to prevent users from "gaming" the system by knowing exactly when checks occur. It also respects pending interjections — won't pile on if you're already being alerted.
 
@@ -323,14 +323,14 @@ This system uses **three specialized AI agents** that work in concert, each with
 
 ## 🔌 OpenAI Integration Deep Dive
 
-This project extensively uses **5 different OpenAI capabilities** working together:
+This project uses OpenAI models across these integration points:
 
-### 1. GPT-4o Vision — Screen Understanding
+### 1. GPT-5-mini (Vision) — Screen Understanding
 
 ```python
 # Observer Agent - Every 30 seconds
 response = client.chat.completions.create(
-    model="gpt-4o",
+    model="gpt-5-mini",
     messages=[
         {
             "role": "system",
@@ -352,16 +352,16 @@ Do NOT make judgments about productivity."""
 )
 ```
 
-**Why GPT-4o Vision?** It's the only model that can "see" what's on your screen. We use `detail: "low"` for faster processing since we don't need pixel-perfect analysis.
+**Why GPT-5-mini (vision)?** It's fast and capable for screen understanding. We use `detail: "low"` for faster processing since we don't need pixel-perfect analysis.
 
 ---
 
-### 2. GPT-4o — Complex Reasoning (Manager Agent)
+### 2. GPT-5.2 — Complex Reasoning (Manager Agent)
 
 ```python
 # Manager Agent - Productivity assessment
 response = client.chat.completions.create(
-    model="gpt-4o",
+    model="gpt-5.2",
     messages=[
         {
             "role": "system",
@@ -382,18 +382,18 @@ interjection_message, tasks_to_complete"""
 )
 ```
 
-**Why GPT-4o for Manager?** This is the critical decision point. We need the most capable reasoning model to weigh multiple factors: Are they on YouTube for research or procrastination? Did they switch apps for a legitimate reason? GPT-4o handles nuance.
+**Why GPT-5.2 for Manager?** This is the critical decision point. We need the most capable reasoning model to weigh multiple factors: Are they on YouTube for research or procrastination? Did they switch apps for a legitimate reason? GPT-5.2 handles nuance.
 
 ---
 
-### 3. GPT-4o-mini — Fast Text Processing
+### 3. GPT-5-mini — Fast Text Processing
 
-Used for three different purposes:
+Used for two different purposes:
 
 **A) Brain Dump → Task Extraction**
 ```python
 response = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-5-mini",
     messages=[
         {
             "role": "system",
@@ -409,7 +409,7 @@ Rules: 3-7 concrete tasks, start with verb, under 10 words each."""
 **B) Compaction Summaries**
 ```python
 response = client.chat.completions.create(
-    model="gpt-4o-mini",
+    model="gpt-5-mini",
     messages=[
         {
             "role": "system",
@@ -420,7 +420,12 @@ response = client.chat.completions.create(
 )
 ```
 
-**C) Voice Response Assessment**
+**Why GPT-5-mini?** These tasks are straightforward text processing. Mini is faster and efficient while staying accurate for structured extraction and summaries.
+
+---
+
+### 4. GPT-4o-mini — Voice Response Assessment
+
 ```python
 response = client.chat.completions.create(
     model="gpt-4o-mini",
@@ -436,11 +441,11 @@ Determine which tasks they completed and if they're being compliant."""
 )
 ```
 
-**Why GPT-4o-mini?** These tasks are straightforward text processing. Mini is 10x cheaper and faster while being perfectly capable for extraction and summarization.
+**Why GPT-4o-mini?** It's well-suited for transcript parsing and task matching, keeping latency low for voice interjection loops.
 
 ---
 
-### 4. TTS-1 — Voice Alerts with Emotional Escalation
+### 5. TTS-1 — Voice Alerts with Emotional Escalation
 
 ```python
 # Generate voice alert with strike-based tone
@@ -464,7 +469,7 @@ response = client.audio.speech.create(
 
 ---
 
-### 5. Whisper-1 — Voice Input for Hands-Free Reporting
+### 6. Whisper-1 — Voice Input for Hands-Free Reporting
 
 ```python
 # Transcribe user's voice response
@@ -492,13 +497,13 @@ transcript = client.audio.transcriptions.create(
 │  USER ACTIONS                        OPENAI MODELS TRIGGERED        │
 │  ────────────                        ──────────────────────         │
 │                                                                     │
-│  📝 Brain Dump ──────────────────→  [GPT-4o-mini] Task extraction   │
+│  📝 Brain Dump ──────────────────→  [GPT-5-mini] Task extraction   │
 │                                                                     │
-│  🖥️ Screen Share (every 30s) ───→  [GPT-4o Vision] Observation      │
+│  🖥️ Screen Share (every 30s) ───→  [GPT-5-mini Vision] Observation  │
 │                                                                     │
-│  ⏰ Every 30 minutes ───────────→  [GPT-4o-mini] Compaction         │
+│  ⏰ Every 30 minutes ───────────→  [GPT-5-mini] Compaction          │
 │                                                                     │
-│  ⏰ Every ~2 minutes ───────────→  [GPT-4o] Manager decision        │
+│  ⏰ Every ~2 minutes ───────────→  [GPT-5.2] Manager decision       │
 │         │                                                           │
 │         └── If distracted ──────→  [TTS-1] Voice alert              │
 │                   │                                                 │
@@ -510,8 +515,9 @@ transcript = client.audio.transcriptions.create(
 │                                                                     │
 │  COST OPTIMIZATION:                                                 │
 │  • Vision uses detail:"low" (faster, cheaper)                       │
-│  • GPT-4o only for critical Manager decisions                       │
-│  • GPT-4o-mini for all text-only processing                         │
+│  • GPT-5.2 only for critical Manager decisions                      │
+│  • GPT-5-mini for observation + compaction + brain dump             │
+│  • GPT-4o-mini for task assessment from transcripts                 │
 │  • TTS/Whisper only when interjection triggered                     │
 │                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -563,7 +569,7 @@ When you complete tasks and report via voice, the system "orders" treats:
 | **Frontend** | Next.js 16, React 19, Tailwind CSS 4, ShadcnUI |
 | **Backend** | Python 3.12, FastAPI, OpenAI SDK |
 | **Database** | SQLite (local, privacy-first) |
-| **AI Models** | GPT-4o (vision + reasoning), GPT-4o-mini (text), TTS-1, Whisper-1 |
+| **AI Models** | GPT-5.2 (reasoning), GPT-5-mini (vision + text), GPT-4o-mini (task parsing), TTS-1, Whisper-1 |
 | **Browser APIs** | WebRTC (screen capture), Web Audio (TTS playback), MediaRecorder (voice) |
 | **OS Integration** | AppleScript (macOS window focus control) |
 
@@ -577,7 +583,7 @@ When you complete tasks and report via voice, the system "orders" treats:
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/health` | Health check |
-| POST | `/api/analyze-braindump` | Extract tasks (GPT-4o-mini) |
+| POST | `/api/analyze-braindump` | Extract tasks (GPT-5-mini) |
 | GET | `/api/tasks` | Get all tasks |
 | POST | `/api/tasks` | Add a task |
 | PATCH | `/api/tasks/{id}` | Update task status |
@@ -590,9 +596,9 @@ When you complete tasks and report via voice, the system "orders" treats:
 
 | Method | Endpoint | OpenAI Model | Description |
 |--------|----------|:------------:|-------------|
-| POST | `/api/observe` | GPT-4o Vision | Observer agent |
-| POST | `/api/compact` | GPT-4o-mini | Compaction agent |
-| POST | `/api/manager` | GPT-4o | Manager agent |
+| POST | `/api/observe` | GPT-5-mini (Vision) | Observer agent |
+| POST | `/api/compact` | GPT-5-mini | Compaction agent |
+| POST | `/api/manager` | GPT-5.2 | Manager agent |
 | GET | `/api/next-manager-interval` | — | Random interval |
 
 </details>

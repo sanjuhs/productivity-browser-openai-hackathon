@@ -1,0 +1,17 @@
+{
+  "name": "sbi_get_transactions",
+  "description": "Get recent transaction history from the virtual SBI bank account. DEMO ONLY.",
+  "arguments": {
+    "type": "object",
+    "properties": {
+      "limit": {
+        "type": "integer",
+        "description": "Maximum number of transactions to return",
+        "default": 20
+      }
+    },
+    "required": []
+  },
+  "endpoint": "http://localhost:8000/api/sbi/transactions",
+  "method": "GET"
+}

@@ -1,0 +1,11 @@
+{
+  "name": "sbi_reset_account",
+  "description": "Reset the virtual SBI bank account to initial balance (₹10,000). For demo purposes only.",
+  "arguments": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "endpoint": "http://localhost:8000/api/sbi/reset",
+  "method": "POST"
+}

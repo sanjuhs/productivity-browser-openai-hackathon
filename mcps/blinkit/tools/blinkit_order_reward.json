@@ -1,0 +1,27 @@
+{
+  "name": "blinkit_order_reward",
+  "description": "Place a reward order on Blinkit for task completion. DEMO ONLY - No real order placed. Rewards: 1 task = Chocolate, 50%+ = Coffee + Cookies, 100% = Premium Snack Box.",
+  "arguments": {
+    "type": "object",
+    "properties": {
+      "tasks_completed": {
+        "type": "integer",
+        "description": "Number of tasks completed so far",
+        "minimum": 0
+      },
+      "total_tasks": {
+        "type": "integer",
+        "description": "Total number of tasks in the list",
+        "minimum": 0
+      },
+      "reason": {
+        "type": "string",
+        "description": "Reason for the reward",
+        "default": "Task completion reward"
+      }
+    },
+    "required": ["tasks_completed", "total_tasks"]
+  },
+  "endpoint": "http://localhost:8000/api/blinkit/reward",
+  "method": "POST"
+}

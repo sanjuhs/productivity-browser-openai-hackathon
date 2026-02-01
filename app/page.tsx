@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
+import Image from "next/image";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
@@ -25,6 +26,12 @@ import {
   Mic,
   MicOff,
   Volume2,
+  Settings,
+  Trash2,
+  RefreshCw,
+  X,
+  Banknote,
+  ShoppingBag,
 } from "lucide-react";
 
 const API_URL = "http://localhost:8000";
@@ -56,6 +63,20 @@ export default function Home() {
   const [interjection, setInterjection] = useState<string | null>(null);
   const [interjectionStrikeCount, setInterjectionStrikeCount] = useState(1);
   const [interjectionPhase, setInterjectionPhase] = useState<"alert" | "listening" | "non-compliance" | "ready">("alert");
+  const [managerMood, setManagerMood] = useState<"cool" | "sad" | "angry" | "happy">("cool");
+  
+  // SBI Bank penalty display
+  const [penaltyAmount, setPenaltyAmount] = useState<number | null>(null);
+  const [balanceBefore, setBalanceBefore] = useState<number | null>(null);
+  const [balanceAfter, setBalanceAfter] = useState<number | null>(null);
+  const [showPenaltyAnimation, setShowPenaltyAnimation] = useState(false);
+  
+  // Settings modal
+  const [showSettings, setShowSettings] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
+  const [sbiBalance, setSbiBalance] = useState<number | null>(null);
+  const [blinkitOrderCount, setBlinkitOrderCount] = useState<number>(0);
+  
   const [isRecording, setIsRecording] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
@@ -188,7 +209,12 @@ export default function Home() {
   }, [checkMicPermission]);
 
   // Trigger interjection - grabs user attention; strikeCount capped at 3
-  const triggerInterjection = useCallback(async (message: string, strikeCount: number = 1) => {
+  const triggerInterjection = useCallback(async (
+    message: string, 
+    strikeCount: number = 1, 
+    mood: "cool" | "sad" | "angry" | "happy" = "cool",
+    penalty?: { amount: number; balanceBefore: number; balanceAfter: number }
+  ) => {
     // Prevent overlapping interjections
     if (interjectionActiveRef.current) {
       console.log("[Interjection] Skipped - another interjection is already active");
@@ -199,6 +225,22 @@ export default function Home() {
     const cappedStrike = Math.min(3, Math.max(1, strikeCount));
     setInterjection(message);
     setInterjectionStrikeCount(cappedStrike);
+    setManagerMood(mood);
+    
+    // Set penalty info for display
+    if (penalty) {
+      setPenaltyAmount(penalty.amount);
+      setBalanceBefore(penalty.balanceBefore);
+      setBalanceAfter(penalty.balanceAfter);
+      setShowPenaltyAnimation(true);
+      // Reset animation after 3 seconds
+      setTimeout(() => setShowPenaltyAnimation(false), 3000);
+    } else {
+      setPenaltyAmount(null);
+      setBalanceBefore(null);
+      setBalanceAfter(null);
+    }
+    
     interjectionTtsPlayedRef.current = false;
     nonComplianceTtsPlayedRef.current = false;
     setNonComplianceCount(0);
@@ -287,6 +329,8 @@ export default function Home() {
           body: JSON.stringify({
             message: interjection,
             strike_count: interjectionStrikeCount,
+            penalty_amount: penaltyAmount,
+            balance_after: balanceAfter,
           }),
         });
         if (!res.ok) throw new Error("TTS failed");
@@ -321,7 +365,7 @@ export default function Home() {
         setInterjectionPhase(forceRedirect ? "ready" : "listening");
       }
     })();
-  }, [interjection, interjectionPhase, interjectionStrikeCount]);
+  }, [interjection, interjectionPhase, interjectionStrikeCount, penaltyAmount, balanceAfter]);
 
   // When in "non-compliance" phase, play escalating TTS then force redirect
   useEffect(() => {
@@ -574,9 +618,14 @@ export default function Home() {
       setIsProductive(data.is_productive);
       setManagerStatus(data.is_productive ? "✓ Productive" : "⚠ Distracted");
 
-      // Show interjection popup directly if Manager says so (pass strike_count for TTS tone)
+      // Show interjection popup directly if Manager says so (pass strike_count, mood, and penalty for character)
       if (data.interjection && data.interjection_message) {
-        triggerInterjection(data.interjection_message, data.strike_count ?? 1);
+        const penalty = data.penalty_amount ? {
+          amount: data.penalty_amount,
+          balanceBefore: data.balance_before,
+          balanceAfter: data.balance_after
+        } : undefined;
+        triggerInterjection(data.interjection_message, data.strike_count ?? 1, data.mood ?? "cool", penalty);
       }
 
       // Refresh tasks if any were updated
@@ -803,6 +852,7 @@ export default function Home() {
       if (!text?.trim()) {
         // No response - treat as non-compliant
         setNonComplianceCount((c) => c + 1);
+        setManagerMood(interjectionStrikeCount >= 2 ? "angry" : "sad"); // Escalate mood
         nonComplianceTtsPlayedRef.current = false;
         setInterjectionPhase("non-compliance");
         setIsTranscribing(false);
@@ -825,11 +875,13 @@ export default function Home() {
             setTasks(await tasksRes.json());
             console.log("[Voice] Marked tasks complete:", tasks_to_complete);
             setNonComplianceCount(0); // Reset on success
+            setManagerMood("happy"); // Manager is pleased!
             setInterjectionPhase("ready");
           } else if (!is_compliant) {
             // Non-compliant response - escalate
             console.log("[Voice] Non-compliant:", compliance_message);
             setNonComplianceCount((c) => c + 1);
+            setManagerMood(interjectionStrikeCount >= 2 ? "angry" : "sad"); // Escalate mood
             nonComplianceTtsPlayedRef.current = false;
             setInterjectionPhase("non-compliance");
           } else {
@@ -859,11 +911,18 @@ export default function Home() {
     // Reset local state
     setInterjection(null);
     setInterjectionPhase("alert");
+    setManagerMood("cool"); // Reset mood
     setMicError(null);
     setNonComplianceCount(0);
     setIsForceRedirectMode(false);
     nonComplianceTtsPlayedRef.current = false;
     interjectionActiveRef.current = false; // Allow new interjections
+    
+    // Reset penalty display
+    setPenaltyAmount(null);
+    setBalanceBefore(null);
+    setBalanceAfter(null);
+    setShowPenaltyAnimation(false);
     
     // Stop title flashing
     if (titleIntervalRef.current) {
@@ -941,6 +1000,90 @@ export default function Home() {
     setManagerStatus("Idle");
   };
 
+  // Settings functions
+  const fetchSettingsData = async () => {
+    try {
+      // Fetch SBI balance
+      const sbiRes = await fetch(`${API_URL}/api/sbi/account`);
+      if (sbiRes.ok) {
+        const sbiData = await sbiRes.json();
+        setSbiBalance(sbiData.balance);
+      }
+      
+      // Fetch Blinkit order count
+      const blinkitRes = await fetch(`${API_URL}/api/blinkit/orders?limit=100`);
+      if (blinkitRes.ok) {
+        const orders = await blinkitRes.json();
+        setBlinkitOrderCount(orders.length);
+      }
+    } catch (e) {
+      console.error("Failed to fetch settings data:", e);
+    }
+  };
+
+  const handleResetAll = async () => {
+    if (!confirm("⚠️ This will delete ALL data including tasks, observations, bank transactions, and orders. Are you sure?")) {
+      return;
+    }
+    
+    setIsResetting(true);
+    try {
+      // Stop agents first
+      stopAutoMode();
+      
+      const res = await fetch(`${API_URL}/api/reset-all`, { method: "DELETE" });
+      if (res.ok) {
+        const data = await res.json();
+        // Refresh local state
+        setTasks([]);
+        setSbiBalance(data.sbi_balance);
+        setBlinkitOrderCount(0);
+        setObserverStatus("Idle");
+        setManagerStatus("Idle");
+        setLastObservation("");
+        setIsProductive(true);
+        alert("✅ All data has been reset!");
+      } else {
+        alert("❌ Failed to reset data");
+      }
+    } catch (e) {
+      console.error("Reset failed:", e);
+      alert("❌ Reset failed: " + (e instanceof Error ? e.message : "Unknown error"));
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
+  const handleResetSBI = async () => {
+    if (!confirm("Reset SBI Bank to ₹10,000?")) return;
+    try {
+      const res = await fetch(`${API_URL}/api/sbi/reset`, { method: "POST" });
+      if (res.ok) {
+        const data = await res.json();
+        setSbiBalance(data.balance);
+      }
+    } catch (e) {
+      console.error("SBI reset failed:", e);
+    }
+  };
+
+  const handleResetBlinkit = async () => {
+    if (!confirm("Clear all Blinkit orders?")) return;
+    try {
+      await fetch(`${API_URL}/api/blinkit/reset`, { method: "POST" });
+      setBlinkitOrderCount(0);
+    } catch (e) {
+      console.error("Blinkit reset failed:", e);
+    }
+  };
+
+  // Fetch settings data when modal opens
+  useEffect(() => {
+    if (showSettings) {
+      fetchSettingsData();
+    }
+  }, [showSettings]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => stopAutoMode();
@@ -952,9 +1095,84 @@ export default function Home() {
       {interjection && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="mx-4 max-w-md rounded-xl bg-white p-6 shadow-2xl dark:bg-zinc-900">
+            {/* Manager Character */}
+            <div className="mb-4 flex justify-center">
+              <div className={`relative rounded-full p-2 ${
+                managerMood === "angry" ? "bg-red-100 dark:bg-red-900/30" :
+                managerMood === "sad" ? "bg-amber-100 dark:bg-amber-900/30" :
+                managerMood === "happy" ? "bg-green-100 dark:bg-green-900/30" :
+                "bg-blue-100 dark:bg-blue-900/30"
+              }`}>
+                <Image 
+                  src={`/assets/${managerMood}.png`} 
+                  alt={`Manager is ${managerMood}`}
+                  width={96}
+                  height={96}
+                  className={`object-contain ${
+                    interjectionPhase === "alert" ? "animate-bounce" :
+                    interjectionPhase === "non-compliance" ? "animate-pulse" : ""
+                  }`}
+                  priority
+                />
+              </div>
+            </div>
+            
+            {/* 💸 SBI BANK PENALTY DISPLAY */}
+            {penaltyAmount && (
+              <div className={`mb-4 rounded-lg border-2 overflow-hidden ${
+                showPenaltyAnimation ? "border-red-500 animate-pulse" : "border-blue-600"
+              }`}>
+                {/* SBI Bank Header */}
+                <div className="bg-blue-600 px-3 py-2 flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 bg-white rounded-full flex items-center justify-center">
+                      <span className="text-blue-600 font-bold text-xs">SBI</span>
+                    </div>
+                    <div>
+                      <p className="text-white text-xs font-semibold">State Bank of India</p>
+                      <p className="text-blue-200 text-[10px]">DEMO - Virtual Account</p>
+                    </div>
+                  </div>
+                  <span className="text-red-300 text-xs font-medium">PENALTY</span>
+                </div>
+                
+                {/* Balance Display */}
+                <div className="bg-gradient-to-b from-blue-50 to-white dark:from-blue-950 dark:to-zinc-900 p-3">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-xs text-zinc-500">Previous Balance</span>
+                    <span className="text-sm text-zinc-600 dark:text-zinc-400">₹{balanceBefore?.toLocaleString()}</span>
+                  </div>
+                  
+                  <div className={`flex justify-between items-center mb-2 py-1 px-2 rounded ${
+                    showPenaltyAnimation ? "bg-red-100 dark:bg-red-900/30" : "bg-red-50 dark:bg-red-900/20"
+                  }`}>
+                    <span className="text-xs text-red-600 dark:text-red-400 font-medium">Penalty Deducted</span>
+                    <span className={`text-lg font-bold text-red-600 dark:text-red-400 ${
+                      showPenaltyAnimation ? "animate-bounce" : ""
+                    }`}>
+                      -₹{penaltyAmount?.toLocaleString()}
+                    </span>
+                  </div>
+                  
+                  <div className="flex justify-between items-center pt-2 border-t border-zinc-200 dark:border-zinc-700">
+                    <span className="text-xs font-medium text-zinc-700 dark:text-zinc-300">New Balance</span>
+                    <span className={`text-xl font-bold ${
+                      (balanceAfter ?? 0) < 1000 ? "text-red-600" : "text-blue-600"
+                    }`}>
+                      ₹{balanceAfter?.toLocaleString()}
+                    </span>
+                  </div>
+                  
+                  {(balanceAfter ?? 0) < 1000 && (
+                    <p className="text-[10px] text-red-500 mt-1 text-center">⚠️ Low balance warning!</p>
+                  )}
+                </div>
+              </div>
+            )}
+            
             <div className="mb-4 flex items-center justify-between gap-3 text-orange-500">
               <div className="flex items-center gap-3">
-                <AlertTriangle className={`h-8 w-8 ${isForceRedirectMode || interjectionPhase === "non-compliance" ? "text-red-500" : ""}`} />
+                <AlertTriangle className={`h-6 w-6 ${isForceRedirectMode || interjectionPhase === "non-compliance" ? "text-red-500" : ""}`} />
                 <h2 className="text-xl font-bold">
                   {interjectionPhase === "alert" && "Hey, focus!"}
                   {interjectionPhase === "listening" && "Your turn"}
@@ -1097,6 +1315,125 @@ export default function Home() {
         </div>
       )}
 
+      {/* Settings Modal */}
+      {showSettings && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="mx-4 w-full max-w-lg rounded-xl bg-white p-6 shadow-2xl dark:bg-zinc-900">
+            <div className="mb-6 flex items-center justify-between">
+              <h2 className="text-xl font-bold flex items-center gap-2">
+                <Settings className="h-5 w-5" />
+                Settings
+              </h2>
+              <Button variant="ghost" size="sm" onClick={() => setShowSettings(false)} className="h-8 w-8 p-0">
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+            
+            {/* SBI Bank Status */}
+            <div className="mb-4 rounded-lg border border-blue-200 dark:border-blue-800 p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 bg-blue-600 rounded-full flex items-center justify-center">
+                    <Banknote className="h-4 w-4 text-white" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm">SBI Bank (Demo)</p>
+                    <p className="text-xs text-muted-foreground">Virtual penalty account</p>
+                  </div>
+                </div>
+                <span className="text-lg font-bold text-blue-600">
+                  ₹{sbiBalance?.toLocaleString() ?? "..."}
+                </span>
+              </div>
+              <Button 
+                variant="outline" 
+                size="sm" 
+                onClick={handleResetSBI}
+                className="w-full text-xs"
+              >
+                <RefreshCw className="h-3 w-3 mr-1" />
+                Reset to ₹10,000
+              </Button>
+            </div>
+            
+            {/* Blinkit Status */}
+            <div className="mb-4 rounded-lg border border-green-200 dark:border-green-800 p-4">
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 bg-green-600 rounded-full flex items-center justify-center">
+                    <ShoppingBag className="h-4 w-4 text-white" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm">Blinkit Rewards (Demo)</p>
+                    <p className="text-xs text-muted-foreground">Virtual reward orders</p>
+                  </div>
+                </div>
+                <span className="text-lg font-bold text-green-600">
+                  {blinkitOrderCount} orders
+                </span>
+              </div>
+              <Button 
+                variant="outline" 
+                size="sm" 
+                onClick={handleResetBlinkit}
+                className="w-full text-xs"
+              >
+                <Trash2 className="h-3 w-3 mr-1" />
+                Clear Order History
+              </Button>
+            </div>
+            
+            {/* Task Stats */}
+            <div className="mb-6 rounded-lg border border-zinc-200 dark:border-zinc-700 p-4">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className="w-8 h-8 bg-orange-500 rounded-full flex items-center justify-center">
+                    <Target className="h-4 w-4 text-white" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm">Tasks</p>
+                    <p className="text-xs text-muted-foreground">Current objectives</p>
+                  </div>
+                </div>
+                <span className="text-lg font-bold">
+                  {tasks.filter(t => t.done).length}/{tasks.length}
+                </span>
+              </div>
+            </div>
+            
+            {/* Danger Zone */}
+            <div className="rounded-lg border-2 border-red-200 dark:border-red-800 p-4 bg-red-50 dark:bg-red-950/20">
+              <h3 className="text-sm font-semibold text-red-600 dark:text-red-400 mb-2 flex items-center gap-2">
+                <AlertTriangle className="h-4 w-4" />
+                Danger Zone
+              </h3>
+              <p className="text-xs text-red-600/80 dark:text-red-400/80 mb-3">
+                This will permanently delete all tasks, observations, bank transactions, and reward orders.
+              </p>
+              <Button 
+                variant="destructive" 
+                size="sm" 
+                onClick={handleResetAll}
+                disabled={isResetting}
+                className="w-full"
+              >
+                {isResetting ? (
+                  <>
+                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    Resetting...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="h-4 w-4 mr-2" />
+                    Reset All Data & Start Fresh
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="mx-auto flex h-full max-w-6xl flex-col px-4 py-3">
         {/* Header */}
         <header className="mb-2 flex items-center justify-between">
@@ -1114,6 +1451,10 @@ export default function Home() {
           </div>
           
           <div className="flex items-center gap-2">
+            <Button size="sm" variant="ghost" onClick={() => setShowSettings(true)} className="h-8 w-8 p-0" title="Settings">
+              <Settings className="h-4 w-4" />
+            </Button>
+            
             <Button size="sm" variant="ghost" onClick={toggleDarkMode} className="h-8 w-8 p-0">
               {darkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </Button>

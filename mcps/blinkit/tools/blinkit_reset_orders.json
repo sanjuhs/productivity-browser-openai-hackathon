@@ -1,0 +1,11 @@
+{
+  "name": "blinkit_reset_orders",
+  "description": "Clear all Blinkit reward orders. For demo purposes only.",
+  "arguments": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "endpoint": "http://localhost:8000/api/blinkit/reset",
+  "method": "POST"
+}

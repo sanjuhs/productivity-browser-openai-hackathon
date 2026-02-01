@@ -1,0 +1,17 @@
+{
+  "name": "blinkit_get_orders",
+  "description": "Get recent reward order history from Blinkit. DEMO ONLY.",
+  "arguments": {
+    "type": "object",
+    "properties": {
+      "limit": {
+        "type": "integer",
+        "description": "Maximum number of orders to return",
+        "default": 20
+      }
+    },
+    "required": []
+  },
+  "endpoint": "http://localhost:8000/api/blinkit/orders",
+  "method": "GET"
+}

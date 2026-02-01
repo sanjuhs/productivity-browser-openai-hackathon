@@ -1,0 +1,11 @@
+{
+  "name": "sbi_check_balance",
+  "description": "Get current virtual SBI bank account balance. DEMO ONLY - No real money involved.",
+  "arguments": {
+    "type": "object",
+    "properties": {},
+    "required": []
+  },
+  "endpoint": "http://localhost:8000/api/sbi/account",
+  "method": "GET"
+}

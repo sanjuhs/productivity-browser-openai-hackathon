@@ -45,8 +45,22 @@ load_dotenv(Path(__file__).parent.parent / ".env")
 CONFIG = {
     "observer_interval_seconds": 30,        # 30-second agent
     "compaction_interval_seconds": 1800,    # 30-minute agent (1800s = 30min)
-    "manager_min_interval_seconds": 115,    # Manager random min (~2 min)
-    "manager_max_interval_seconds": 125,    # Manager random max (~2 min)
+    "manager_min_interval_seconds": 15,    # Manager random min (~2 min)
+    "manager_max_interval_seconds": 25,    # Manager random max (~2 min)
+    
+    # ==================== CARROT & STICK CONFIG ====================
+    # SBI Bank Penalty (STICK) - Deduct money on distraction
+    "sbi_initial_balance": 10000,           # Starting balance in ₹
+    "penalty_strike_1": 50,                 # ₹50 for first strike (gentle)
+    "penalty_strike_2": 100,                # ₹100 for second strike (firm)
+    "penalty_strike_3": 200,                # ₹200 for third strike (stern)
+    "penalty_non_compliance": 150,          # ₹150 for refusing to comply
+    
+    # Blinkit Rewards (CARROT) - Order treats on task completion
+    "reward_single_task": "Dairy Milk Silk Chocolate",
+    "reward_half_tasks": "Cold Coffee + Cookies Pack",
+    "reward_all_tasks": "Premium Snack Box + Ice Cream",
+    # ===============================================================
 }
 # ============================================================
 
@@ -140,9 +154,60 @@ def init_db():
         (datetime.now().isoformat(), datetime.now().isoformat())
     )
     
+    # ==================== SBI BANK (STICK) ====================
+    # Virtual bank account for penalty deductions
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sbi_account (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            account_number TEXT NOT NULL,
+            account_holder TEXT NOT NULL,
+            balance REAL NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    
+    # Transaction history for penalties
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sbi_transactions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            type TEXT NOT NULL,
+            amount REAL NOT NULL,
+            balance_after REAL NOT NULL,
+            description TEXT NOT NULL,
+            strike_count INTEGER
+        )
+    """)
+    
+    # Initialize SBI account if not exists
+    conn.execute(
+        """INSERT OR IGNORE INTO sbi_account 
+           (id, account_number, account_holder, balance, created_at, updated_at) 
+           VALUES (1, 'SBIN0001234567890', 'Productivity User', ?, ?, ?)""",
+        (CONFIG["sbi_initial_balance"], datetime.now().isoformat(), datetime.now().isoformat())
+    )
+    
+    # ==================== BLINKIT REWARDS (CARROT) ====================
+    # Orders placed as rewards for productivity
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS blinkit_orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            order_id TEXT NOT NULL,
+            item TEXT NOT NULL,
+            status TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            tasks_completed INTEGER,
+            total_tasks INTEGER
+        )
+    """)
+    
     conn.commit()
     conn.close()
     logger.info(f"Database ready: {DB_PATH}")
+    logger.info(f"  💰 SBI Bank: ₹{CONFIG['sbi_initial_balance']} initial balance")
+    logger.info(f"  🛒 Blinkit: Rewards configured")
 
 
 @asynccontextmanager
@@ -211,8 +276,13 @@ class ManagerResponse(BaseModel):
     interjection: bool
     interjection_message: str | None
     strike_count: int = 1  # 1–3, for TTS tone escalation
+    mood: str = "cool"  # cool, sad, angry, happy - for character display
     tasks_updated: list[str]
     elapsed_ms: float
+    # SBI Bank penalty info (for frontend display)
+    penalty_amount: float | None = None
+    balance_before: float | None = None
+    balance_after: float | None = None
 
 
 class TaskItem(BaseModel):
@@ -230,11 +300,14 @@ class InterjectionResponse(BaseModel):
     message: str | None
     timestamp: str | None
     strike_count: int | None = None
+    mood: str | None = None  # cool, sad, angry, happy - for character display
 
 
 class InterjectionSpeechRequest(BaseModel):
     message: str
     strike_count: int = 1  # 1–3
+    penalty_amount: float | None = None  # Amount deducted from bank
+    balance_after: float | None = None  # New balance after penalty
 
 
 class AssessTaskCompletionRequest(BaseModel):
@@ -266,6 +339,62 @@ class ConfigResponse(BaseModel):
     manager_max_interval_seconds: int
 
 
+# ==================== SBI BANK MODELS (STICK) ====================
+class SBIAccountResponse(BaseModel):
+    account_number: str
+    account_holder: str
+    balance: float
+    currency: str = "INR"
+    bank_name: str = "State Bank of India"
+    is_demo: bool = True  # Clearly marked as fictional
+
+
+class SBITransactionResponse(BaseModel):
+    id: int
+    timestamp: str
+    type: str  # "PENALTY" or "CREDIT"
+    amount: float
+    balance_after: float
+    description: str
+    strike_count: int | None
+
+
+class SBIPenaltyRequest(BaseModel):
+    strike_count: int = 1
+    reason: str = "Distraction detected"
+
+
+class SBIPenaltyResponse(BaseModel):
+    success: bool
+    amount_deducted: float
+    new_balance: float
+    message: str
+    transaction_id: int
+
+
+# ==================== BLINKIT MODELS (CARROT) ====================
+class BlinkitOrderResponse(BaseModel):
+    order_id: str
+    item: str
+    status: str  # "PLACED", "CONFIRMED", "DELIVERED"
+    reason: str
+    timestamp: str
+    estimated_delivery: str
+    is_demo: bool = True  # Clearly marked as fictional
+
+
+class BlinkitRewardRequest(BaseModel):
+    tasks_completed: int
+    total_tasks: int
+    reason: str = "Task completion reward"
+
+
+class BlinkitRewardResponse(BaseModel):
+    success: bool
+    order: BlinkitOrderResponse | None
+    message: str
+
+
 # ============================================================
 # Health & Config
 # ============================================================
@@ -278,6 +407,233 @@ def health():
 @app.get("/api/config", response_model=ConfigResponse)
 def get_config():
     return ConfigResponse(**CONFIG)
+
+
+# ============================================================
+# SBI BANK API (STICK) - Virtual Bank for Penalties
+# ============================================================
+# ⚠️ DISCLAIMER: This is a FICTIONAL demo bank for demonstration purposes only.
+# No real money is involved. State Bank of India branding used for visual authenticity.
+
+@app.get("/api/sbi/account", response_model=SBIAccountResponse)
+def get_sbi_account():
+    """Get virtual SBI account details (DEMO - No real money)"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    account = conn.execute("SELECT * FROM sbi_account WHERE id = 1").fetchone()
+    conn.close()
+    
+    if not account:
+        raise HTTPException(status_code=404, detail="Account not found")
+    
+    return SBIAccountResponse(
+        account_number=account["account_number"],
+        account_holder=account["account_holder"],
+        balance=account["balance"]
+    )
+
+
+@app.get("/api/sbi/transactions", response_model=list[SBITransactionResponse])
+def get_sbi_transactions(limit: int = 20):
+    """Get recent SBI transactions (DEMO)"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    txns = conn.execute(
+        "SELECT * FROM sbi_transactions ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    
+    return [SBITransactionResponse(
+        id=t["id"],
+        timestamp=t["timestamp"],
+        type=t["type"],
+        amount=t["amount"],
+        balance_after=t["balance_after"],
+        description=t["description"],
+        strike_count=t["strike_count"]
+    ) for t in txns]
+
+
+@app.post("/api/sbi/penalty", response_model=SBIPenaltyResponse)
+def deduct_sbi_penalty(req: SBIPenaltyRequest):
+    """
+    Deduct penalty from virtual SBI account (DEMO - No real money).
+    Called when user is distracted/non-compliant.
+    """
+    logger.info("")
+    logger.info("💸 SBI BANK PENALTY (DEMO)")
+    logger.info("─" * 40)
+    
+    # Determine penalty amount based on strike
+    strike = max(1, min(3, req.strike_count))
+    if strike == 1:
+        amount = CONFIG["penalty_strike_1"]
+    elif strike == 2:
+        amount = CONFIG["penalty_strike_2"]
+    else:
+        amount = CONFIG["penalty_strike_3"]
+    
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    
+    # Get current balance
+    account = conn.execute("SELECT balance FROM sbi_account WHERE id = 1").fetchone()
+    if not account:
+        conn.close()
+        raise HTTPException(status_code=404, detail="Account not found")
+    
+    current_balance = account["balance"]
+    new_balance = max(0, current_balance - amount)  # Don't go negative
+    
+    # Update balance
+    conn.execute(
+        "UPDATE sbi_account SET balance = ?, updated_at = ? WHERE id = 1",
+        (new_balance, datetime.now().isoformat())
+    )
+    
+    # Record transaction
+    cursor = conn.execute(
+        """INSERT INTO sbi_transactions 
+           (timestamp, type, amount, balance_after, description, strike_count)
+           VALUES (?, 'PENALTY', ?, ?, ?, ?)""",
+        (datetime.now().isoformat(), amount, new_balance, req.reason, strike)
+    )
+    txn_id = cursor.lastrowid
+    conn.commit()
+    conn.close()
+    
+    logger.info(f"  Strike: {strike}/3")
+    logger.info(f"  Amount: ₹{amount}")
+    logger.info(f"  Balance: ₹{current_balance} → ₹{new_balance}")
+    logger.info(f"  Reason: {req.reason}")
+    logger.info("─" * 40)
+    
+    return SBIPenaltyResponse(
+        success=True,
+        amount_deducted=amount,
+        new_balance=new_balance,
+        message=f"₹{amount} deducted for: {req.reason}. New balance: ₹{new_balance}",
+        transaction_id=txn_id
+    )
+
+
+@app.post("/api/sbi/reset")
+def reset_sbi_account():
+    """Reset SBI account to initial balance (for demo purposes)"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "UPDATE sbi_account SET balance = ?, updated_at = ? WHERE id = 1",
+        (CONFIG["sbi_initial_balance"], datetime.now().isoformat())
+    )
+    conn.execute("DELETE FROM sbi_transactions")
+    conn.commit()
+    conn.close()
+    logger.info(f"💰 SBI Account reset to ₹{CONFIG['sbi_initial_balance']}")
+    return {"status": "reset", "balance": CONFIG["sbi_initial_balance"]}
+
+
+# ============================================================
+# BLINKIT API (CARROT) - Virtual Rewards for Productivity
+# ============================================================
+# ⚠️ DISCLAIMER: This is a FICTIONAL demo for demonstration purposes only.
+# No real orders are placed. Blinkit branding used for visual authenticity.
+
+def _generate_order_id() -> str:
+    """Generate a fake Blinkit order ID"""
+    return f"BLK{random.randint(100000, 999999)}"
+
+
+def _get_reward_item(tasks_completed: int, total_tasks: int) -> str:
+    """Determine reward based on task completion progress"""
+    if total_tasks == 0:
+        return CONFIG["reward_single_task"]
+    
+    completion_ratio = tasks_completed / total_tasks
+    
+    if completion_ratio >= 1.0:
+        return CONFIG["reward_all_tasks"]
+    elif completion_ratio >= 0.5:
+        return CONFIG["reward_half_tasks"]
+    else:
+        return CONFIG["reward_single_task"]
+
+
+@app.get("/api/blinkit/orders", response_model=list[BlinkitOrderResponse])
+def get_blinkit_orders(limit: int = 20):
+    """Get recent Blinkit reward orders (DEMO)"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    orders = conn.execute(
+        "SELECT * FROM blinkit_orders ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    conn.close()
+    
+    return [BlinkitOrderResponse(
+        order_id=o["order_id"],
+        item=o["item"],
+        status=o["status"],
+        reason=o["reason"],
+        timestamp=o["timestamp"],
+        estimated_delivery="10-15 minutes"
+    ) for o in orders]
+
+
+@app.post("/api/blinkit/reward", response_model=BlinkitRewardResponse)
+def place_blinkit_reward(req: BlinkitRewardRequest):
+    """
+    Place a reward order on Blinkit (DEMO - No real order placed).
+    Called when user completes tasks.
+    """
+    logger.info("")
+    logger.info("🛒 BLINKIT REWARD ORDER (DEMO)")
+    logger.info("─" * 40)
+    
+    # Determine reward item
+    item = _get_reward_item(req.tasks_completed, req.total_tasks)
+    order_id = _generate_order_id()
+    
+    # Record order
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        """INSERT INTO blinkit_orders 
+           (timestamp, order_id, item, status, reason, tasks_completed, total_tasks)
+           VALUES (?, ?, ?, 'PLACED', ?, ?, ?)""",
+        (datetime.now().isoformat(), order_id, item, req.reason, req.tasks_completed, req.total_tasks)
+    )
+    conn.commit()
+    conn.close()
+    
+    logger.info(f"  Order ID: {order_id}")
+    logger.info(f"  Item: {item}")
+    logger.info(f"  Progress: {req.tasks_completed}/{req.total_tasks} tasks")
+    logger.info(f"  Reason: {req.reason}")
+    logger.info("─" * 40)
+    
+    order = BlinkitOrderResponse(
+        order_id=order_id,
+        item=item,
+        status="PLACED",
+        reason=req.reason,
+        timestamp=datetime.now().isoformat(),
+        estimated_delivery="10-15 minutes"
+    )
+    
+    return BlinkitRewardResponse(
+        success=True,
+        order=order,
+        message=f"🎉 Reward ordered: {item}! Estimated delivery: 10-15 minutes"
+    )
+
+
+@app.post("/api/blinkit/reset")
+def reset_blinkit_orders():
+    """Clear all Blinkit orders (for demo purposes)"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("DELETE FROM blinkit_orders")
+    conn.commit()
+    conn.close()
+    logger.info("🛒 Blinkit orders cleared")
+    return {"status": "reset"}
 
 
 # ============================================================
@@ -596,8 +952,28 @@ def manager_check(req: ManagerRequest):
     Manager Agent - Runs every 45-60 seconds (random)
     Decides if user is productive, can update tasks, can INTERJECT
     Uses GPT-5-mini (most intelligent model available)
+    
+    IMPORTANT: Will not create new interjections if one is already pending (prevents overlap)
     """
     start = time.perf_counter()
+    
+    # Check for pending interjection FIRST - skip if one is active
+    if _has_pending_interjection():
+        logger.info("")
+        logger.info("👔 MANAGER AGENT (SKIPPED)")
+        logger.info("─" * 40)
+        logger.info("  ⏸️  Interjection already pending - skipping to prevent overlap")
+        logger.info("─" * 40)
+        return ManagerResponse(
+            is_productive=True,  # Don't trigger anything
+            reasoning="Skipped: interjection already in progress",
+            interjection=False,
+            interjection_message=None,
+            strike_count=0,
+            mood="cool",
+            tasks_updated=[],
+            elapsed_ms=round((time.perf_counter() - start) * 1000, 1)
+        )
     
     logger.info("")
     logger.info("👔 MANAGER AGENT")
@@ -717,30 +1093,61 @@ Assess the user's productivity and decide if an interjection is needed."""
         conn.close()
     
     # Handle interjection: get/increment strike (capped at 3), save pending
+    # Double-check for pending interjection to prevent race conditions
     strike_count = 0
+    penalty_amount = None
+    balance_before = None
+    balance_after = None
     if interjection and interjection_message:
-        conn = sqlite3.connect(DB_PATH)
-        conn.row_factory = sqlite3.Row
-        row = conn.execute("SELECT strike_count FROM focus_strikes WHERE id = 1").fetchone()
-        current = (row["strike_count"] if row else 0)
-        strike_count = min(3, current + 1)  # Cap at 3
-        conn.execute(
-            "UPDATE focus_strikes SET strike_count = ?, updated_at = ? WHERE id = 1",
-            (strike_count, datetime.now().isoformat())
-        )
-        conn.execute(
-            "INSERT INTO pending_interjections (timestamp, message, acknowledged) VALUES (?, ?, 0)",
-            (datetime.now().isoformat(), interjection_message)
-        )
-        conn.commit()
-        conn.close()
-        logger.info("")
-        logger.info("🚨 " + "=" * 36 + " 🚨")
-        logger.info("🚨        INTERJECTION            🚨")
-        logger.info("🚨 " + "=" * 36 + " 🚨")
-        logger.info(f"   Strike {strike_count}/3: {interjection_message}")
-        logger.info("🚨 " + "=" * 36 + " 🚨")
-        logger.info("")
+        # Race condition check: verify no pending interjection before creating one
+        if _has_pending_interjection():
+            logger.info("  ⏸️  Interjection blocked: another is already pending")
+            interjection = False
+            interjection_message = None
+        else:
+            conn = sqlite3.connect(DB_PATH)
+            conn.row_factory = sqlite3.Row
+            row = conn.execute("SELECT strike_count FROM focus_strikes WHERE id = 1").fetchone()
+            current = (row["strike_count"] if row else 0)
+            strike_count = min(3, current + 1)  # Cap at 3
+            conn.execute(
+                "UPDATE focus_strikes SET strike_count = ?, updated_at = ? WHERE id = 1",
+                (strike_count, datetime.now().isoformat())
+            )
+            conn.execute(
+                "INSERT INTO pending_interjections (timestamp, message, acknowledged) VALUES (?, ?, 0)",
+                (datetime.now().isoformat(), interjection_message)
+            )
+            conn.commit()
+            conn.close()
+            logger.info("")
+            logger.info("🚨 " + "=" * 36 + " 🚨")
+            logger.info("🚨        INTERJECTION            🚨")
+            logger.info("🚨 " + "=" * 36 + " 🚨")
+            logger.info(f"   Strike {strike_count}/3: {interjection_message}")
+            logger.info("🚨 " + "=" * 36 + " 🚨")
+            logger.info("")
+            
+            # 💸 STICK: Deduct penalty from SBI Bank account
+            # Get balance BEFORE penalty for display
+            conn_bal = sqlite3.connect(DB_PATH)
+            conn_bal.row_factory = sqlite3.Row
+            bal_row = conn_bal.execute("SELECT balance FROM sbi_account WHERE id = 1").fetchone()
+            balance_before = bal_row["balance"] if bal_row else CONFIG["sbi_initial_balance"]
+            conn_bal.close()
+            
+            try:
+                penalty_result = deduct_sbi_penalty(SBIPenaltyRequest(
+                    strike_count=strike_count,
+                    reason=f"Strike {strike_count}: {interjection_message[:50]}..."
+                ))
+                penalty_amount = penalty_result.amount_deducted
+                balance_after = penalty_result.new_balance
+                logger.info(f"  💸 SBI Penalty: ₹{penalty_amount} deducted (₹{balance_before} → ₹{balance_after})")
+            except Exception as e:
+                logger.error(f"  💸 SBI Penalty failed: {e}")
+                penalty_amount = None
+                balance_after = None
     
     # Save manager decision
     conn = sqlite3.connect(DB_PATH)
@@ -773,14 +1180,25 @@ Assess the user's productivity and decide if an interjection is needed."""
     logger.info(f"  └─ Reasoning: {reasoning}")
     logger.info("─" * 40)
     
+    # Determine mood for character display
+    mood = _get_mood(
+        strike_count=strike_count if interjection else 0,
+        is_productive=is_productive,
+        tasks_completed=len(tasks_updated) > 0
+    )
+    
     return ManagerResponse(
         is_productive=is_productive,
         reasoning=reasoning,
         interjection=interjection,
         interjection_message=interjection_message,
         strike_count=strike_count if interjection else 0,
+        mood=mood,
         tasks_updated=tasks_updated,
-        elapsed_ms=round(total_time, 1)
+        elapsed_ms=round(total_time, 1),
+        penalty_amount=penalty_amount,
+        balance_before=balance_before,
+        balance_after=balance_after
     )
 
 
@@ -803,13 +1221,15 @@ def check_interjection():
     conn.close()
     
     if pending:
+        mood = _get_mood(strike_count=strike_count, is_productive=False)
         return InterjectionResponse(
             has_interjection=True,
             message=pending["message"],
             timestamp=pending["timestamp"],
-            strike_count=strike_count
+            strike_count=strike_count,
+            mood=mood
         )
-    return InterjectionResponse(has_interjection=False, message=None, timestamp=None, strike_count=None)
+    return InterjectionResponse(has_interjection=False, message=None, timestamp=None, strike_count=None, mood=None)
 
 
 @app.post("/api/interjection/acknowledge")
@@ -831,18 +1251,21 @@ def acknowledge_interjection():
 # ============================================================
 
 # Tone escalation: strike 1 = gentle, 2 = firm, 3+ = stern (no voice input, just redirect)
-def _interjection_script(message: str, strike_count: int) -> str:
+# TTS with PENALTY NARRATION - let the user know money is being deducted!
+def _interjection_script(message: str, strike_count: int, penalty_amount: float | None = None, balance_after: float | None = None) -> str:
     strike_count = max(1, min(3, strike_count))  # Cap at 3
+    
+    # Build penalty narration
+    penalty_text = ""
+    if penalty_amount and balance_after is not None:
+        penalty_text = f" I'm deducting {int(penalty_amount)} rupees from your bank account as a penalty. Your new balance is {int(balance_after)} rupees."
+    
     if strike_count == 1:
-        intro = "Hey. "
-        outro = " How much of the work have you completed from your task list? Please tell me which tasks you've finished."
+        return f"Hey, I noticed you're distracted. {message}{penalty_text} This is your first warning. Tell me, what tasks have you completed so far?"
     elif strike_count == 2:
-        intro = "Listen. This is the second time. "
-        outro = " How much of the work have you completed from your task list? Tell me which tasks are done."
+        return f"This is your second warning. {message}{penalty_text} You're losing money every time you get distracted. Which tasks have you finished? Get back to work."
     else:  # strike_count >= 3 - stern, no voice input requested
-        # Don't include the original message - just be stern and redirect
-        return "Enough is enough. You've spent too much time in this 30-minute window on unproductive platforms. I'm sending you back to work. No more distractions. Focus. Now."
-    return intro + message + outro
+        return f"Strike three. That's it.{penalty_text} I've had enough. You need to stop wasting time and get back to work immediately. No more excuses. Go. Now."
 
 
 def _strike_label(strike_count: int) -> str:
@@ -853,6 +1276,34 @@ def _strike_label(strike_count: int) -> str:
         return "firm"
     else:
         return "stern (force redirect)"
+
+
+def _get_mood(strike_count: int, is_productive: bool = False, tasks_completed: bool = False) -> str:
+    """
+    Determine manager mood for character display.
+    - happy: user is productive or just completed tasks
+    - cool: gentle reminder (strike 1)
+    - sad: disappointed, no progress (strike 2)
+    - angry: stern enforcement (strike 3+)
+    """
+    if tasks_completed or (is_productive and strike_count == 0):
+        return "happy"
+    if strike_count >= 3:
+        return "angry"
+    if strike_count == 2:
+        return "sad"
+    return "cool"  # strike 1 or default
+
+
+def _has_pending_interjection() -> bool:
+    """Check if there's an unacknowledged interjection (prevents overlapping interjections)"""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    pending = conn.execute(
+        "SELECT COUNT(*) as count FROM pending_interjections WHERE acknowledged = 0"
+    ).fetchone()
+    conn.close()
+    return pending["count"] > 0 if pending else False
 
 
 @app.get("/api/strike-status", response_model=StrikeStatusResponse)
@@ -875,19 +1326,21 @@ def get_strike_status():
 
 @app.post("/api/interjection-speech")
 def interjection_speech(req: InterjectionSpeechRequest):
-    """Generate TTS audio for interjection message with strike-based tone. Returns MP3."""
+    """Generate TTS audio for interjection message with strike-based tone and penalty narration. Returns MP3."""
     strike_count = max(1, min(3, req.strike_count))  # Cap at 3
     logger.info("")
     logger.info("🔊 TTS INTERJECTION")
     logger.info("─" * 40)
     logger.info(f"  Strike: {strike_count}/3 ({_strike_label(strike_count)})")
     logger.info(f"  Message: {req.message[:80]}..." if len(req.message) > 80 else f"  Message: {req.message}")
+    if req.penalty_amount:
+        logger.info(f"  💸 Penalty: ₹{req.penalty_amount} | Balance: ₹{req.balance_after}")
     logger.info("─" * 40)
-    script = _interjection_script(req.message, strike_count)
+    script = _interjection_script(req.message, strike_count, req.penalty_amount, req.balance_after)
     try:
         response = client.audio.speech.create(
             model="tts-1",
-            voice="onyx",
+            voice="nova",
             input=script,
             response_format="mp3",
         )
@@ -899,32 +1352,16 @@ def interjection_speech(req: InterjectionSpeechRequest):
 
 
 def _non_compliance_script(strike_count: int, tasks_remaining: int) -> str:
-    """Generate escalating TTS message for non-compliant developer"""
+    """Generate escalating TTS message for non-compliant developer - SUCCINCT"""
     strike_count = max(1, min(10, strike_count))  # Allow higher for repeated non-compliance
-    tasks_text = f"You still have {tasks_remaining} task{'s' if tasks_remaining != 1 else ''} remaining." if tasks_remaining > 0 else ""
+    tasks_text = f"{tasks_remaining} tasks left." if tasks_remaining > 0 else ""
     
     if strike_count <= 2:
-        return f"""I notice you haven't made progress on your tasks. {tasks_text}
-        
-Let me remind you: staying focused helps you finish faster and feel accomplished. 
-Every completed task is a win. Let's get back to work and knock out those remaining items."""
-    
+        return f"No progress reported. {tasks_text} Get back to work."
     elif strike_count <= 4:
-        return f"""This is concerning. You're not making progress and continue to be distracted. {tasks_text}
-        
-Here's the reality: every minute you waste now is a minute you'll regret later. 
-Your future self is counting on you. Stop procrastinating. Open Cursor. Start working. Now."""
-    
+        return f"Still no progress. {tasks_text} Stop wasting time. Focus now."
     else:
-        return f"""I've asked you multiple times now. This is unacceptable. {tasks_text}
-        
-You made a commitment to complete these tasks. Breaking that commitment has consequences:
-- You fall behind schedule
-- Stress accumulates  
-- Quality suffers
-- Trust erodes
-
-I'm switching you back to work. You will stay focused. No more excuses. Get. It. Done."""
+        return f"Unacceptable. {tasks_text} I'm forcing you back to work. No excuses."
 
 
 @app.post("/api/non-compliance-speech")
@@ -940,7 +1377,7 @@ def non_compliance_speech(req: NonComplianceSpeechRequest):
     try:
         response = client.audio.speech.create(
             model="tts-1",
-            voice="onyx",
+            voice="nova",
             input=script,
             response_format="mp3",
         )
@@ -1087,6 +1524,24 @@ Rules for "is_compliant":
     if tasks_to_complete:
         compliance_message = f"Completed {len(tasks_to_complete)} task(s)"
         is_compliant = True  # If they completed tasks, they're compliant
+        
+        # 🎁 CARROT: Order Blinkit reward for task completion!
+        total_tasks = len(req.task_list)
+        completed_now = len(tasks_to_complete)
+        already_done = len([t for t in req.task_list if t.done])
+        total_completed = already_done + completed_now
+        
+        try:
+            reward_result = place_blinkit_reward(BlinkitRewardRequest(
+                tasks_completed=total_completed,
+                total_tasks=total_tasks,
+                reason=f"Completed {completed_now} task(s): {', '.join(tasks_to_complete[:2])}{'...' if len(tasks_to_complete) > 2 else ''}"
+            ))
+            logger.info(f"  🎁 Blinkit Reward: {reward_result.order.item if reward_result.order else 'None'}")
+            compliance_message += f" 🎁 Reward ordered: {reward_result.order.item if reward_result.order else 'None'}"
+        except Exception as e:
+            logger.error(f"  🎁 Blinkit Reward failed: {e}")
+            
     elif not is_compliant and len(pending_tasks) > 0:
         compliance_message = compliance_reason or "No progress reported on pending tasks"
     else:
@@ -1143,7 +1598,7 @@ def get_decisions(limit: int = 20):
 
 @app.delete("/api/history")
 def clear_history():
-    """Clear all history and reset focus strikes"""
+    """Clear observation history only (keeps tasks, bank, orders)"""
     conn = sqlite3.connect(DB_PATH)
     conn.execute("DELETE FROM observations")
     conn.execute("DELETE FROM compactions")
@@ -1155,8 +1610,64 @@ def clear_history():
     )
     conn.commit()
     conn.close()
-    logger.info("All history cleared")
+    logger.info("Observation history cleared")
     return {"status": "cleared"}
+
+
+@app.delete("/api/reset-all")
+def reset_all_data():
+    """
+    FULL RESET - Clear ALL data and start fresh:
+    - Tasks
+    - Observations & Compactions
+    - Manager decisions
+    - Interjections & Strikes
+    - SBI Bank (reset to initial balance)
+    - Blinkit orders
+    """
+    conn = sqlite3.connect(DB_PATH)
+    
+    # Clear all tables
+    conn.execute("DELETE FROM tasks")
+    conn.execute("DELETE FROM observations")
+    conn.execute("DELETE FROM compactions")
+    conn.execute("DELETE FROM manager_decisions")
+    conn.execute("DELETE FROM pending_interjections")
+    conn.execute("DELETE FROM sbi_transactions")
+    conn.execute("DELETE FROM blinkit_orders")
+    
+    # Reset focus strikes
+    conn.execute(
+        "UPDATE focus_strikes SET strike_count = 0, window_start = ?, updated_at = ? WHERE id = 1",
+        (datetime.now().isoformat(), datetime.now().isoformat())
+    )
+    
+    # Reset SBI Bank to initial balance
+    conn.execute(
+        "UPDATE sbi_account SET balance = ?, updated_at = ? WHERE id = 1",
+        (CONFIG["sbi_initial_balance"], datetime.now().isoformat())
+    )
+    
+    conn.commit()
+    conn.close()
+    
+    logger.info("")
+    logger.info("🔄 " + "=" * 36 + " 🔄")
+    logger.info("🔄        FULL DATA RESET           🔄")
+    logger.info("🔄 " + "=" * 36 + " 🔄")
+    logger.info(f"  ✓ Tasks cleared")
+    logger.info(f"  ✓ Observations cleared")
+    logger.info(f"  ✓ Manager decisions cleared")
+    logger.info(f"  ✓ Strikes reset to 0")
+    logger.info(f"  ✓ SBI Bank reset to ₹{CONFIG['sbi_initial_balance']}")
+    logger.info(f"  ✓ Blinkit orders cleared")
+    logger.info("🔄 " + "=" * 36 + " 🔄")
+    
+    return {
+        "status": "reset",
+        "message": "All data cleared. Fresh start!",
+        "sbi_balance": CONFIG["sbi_initial_balance"]
+    }
 
 
 # ============================================================

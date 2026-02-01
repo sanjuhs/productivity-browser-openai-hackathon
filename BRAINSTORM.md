@@ -10,7 +10,7 @@ Three specialized agents work together:
 
 1. **Observer Agent (30s interval)**
    - Captures screen via WebRTC
-   - Uses GPT-4o Vision to describe what's on screen
+   - Uses GPT-5-mini (vision) to describe what's on screen
    - Stores factual observations (no inference)
 
 2. **Compaction Agent (30min interval)**
@@ -20,7 +20,7 @@ Three specialized agents work together:
 
 3. **Manager Agent (~2min random interval)**
    - Reads recent observations + task list
-   - Decides if user is productive
+   - Decides if user is productive (GPT-5.2 reasoning)
    - Triggers interjections when distracted
    - Manages strike count (1-3)
 
@@ -32,8 +32,10 @@ Three specialized agents work together:
 - **Local Mode**: macOS window focus control via backend
 
 ### Backend (Python + FastAPI)
-- **GPT-4o Vision**: Screen observation and analysis
-- **GPT-4o-mini**: Manager decisions and task assessment
+- **GPT-5-mini (vision)**: Screen observation and analysis
+- **GPT-5.2**: Manager decisions (reasoning)
+- **GPT-5-mini (text)**: Brain dump task extraction + compaction summaries
+- **GPT-4o-mini**: Voice transcript task assessment
 - **TTS-1**: Text-to-speech for interjection voice alerts
 - **Whisper-1**: Speech-to-text for developer voice responses
 - **SQLite**: Persistent storage of all agent data
@@ -48,7 +50,7 @@ Three specialized agents work together:
 │  [Screen Capture] → [Frame] → POST /api/observe                     │
 │                                      ↓                              │
 │                            ┌─────────────────┐                      │
-│                            │   GPT-4o Vision │                      │
+│                            │  GPT-5-mini     │                      │
 │                            │ "What's on screen?"                    │
 │                            └────────┬────────┘                      │
 │                                     ↓                               │
@@ -64,7 +66,7 @@ Three specialized agents work together:
 │  POST /api/compact                                                  │
 │        ↓                                                            │
 │  ┌─────────────────┐    ┌────────────────────────┐                  │
-│  │ Read last 30min │ →  │    GPT-4o-mini         │                  │
+│  │ Read last 30min │ →  │    GPT-5-mini          │                  │
 │  │  observations   │    │ "Summarize activity"   │                  │
 │  └─────────────────┘    └───────────┬────────────┘                  │
 │                                     ↓                               │
@@ -85,7 +87,7 @@ Three specialized agents work together:
 │  └───────────────────┬─────────────────────┘                        │
 │                      ↓                                              │
 │            ┌─────────────────┐                                      │
-│            │  GPT-4o-mini    │                                      │
+│            │   GPT-5.2       │                                      │
 │            │ "Is productive? │                                      │
 │            │  Interjection?" │                                      │
 │            └────────┬────────┘                                      │
@@ -190,7 +192,7 @@ CREATE TABLE focus_strikes (
 
 ### Phase 1 - Foundation ✅
 - [x] Project setup (Next.js + Python backend)
-- [x] Screenshot analysis with GPT-4o
+- [x] Screenshot analysis with GPT-5-mini (vision)
 - [x] Basic UI with daily input + focus mode
 
 ### Phase 2 - Multi-Agent System ✅
@@ -220,13 +222,13 @@ CREATE TABLE focus_strikes (
 | Frontend | Next.js 16, React 19, Tailwind CSS 4, ShadcnUI |
 | Backend | Python 3.12, FastAPI, OpenAI SDK |
 | Database | SQLite (local) |
-| AI Models | GPT-4o (vision), GPT-4o-mini (text), TTS-1, Whisper-1 |
+| AI Models | GPT-5.2 (reasoning), GPT-5-mini (vision + text), GPT-4o-mini (task parsing), TTS-1, Whisper-1 |
 | APIs | WebRTC (screen), Web Audio (alerts), MediaRecorder (voice) |
 | OS Integration | AppleScript (macOS window focus) |
 
 ## Performance Metrics
-- Observer Agent: ~15-25s per observation (GPT-4o vision)
-- Manager Agent: ~2-4s per decision (GPT-4o-mini)
+- Observer Agent: ~15-25s per observation (GPT-5-mini vision)
+- Manager Agent: ~2-4s per decision (GPT-5.2)
 - TTS Generation: ~1-2s for MP3
 - Whisper Transcription: ~1-2s for short clips
 - Agent Intervals: Observer 30s, Manager ~2min, Compaction 30min

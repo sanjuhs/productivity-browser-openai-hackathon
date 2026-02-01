@@ -82,9 +82,9 @@ Open http://localhost:3000
 
 Three agents work together to monitor productivity:
 
-1. **Observer Agent (30s)** - Captures screen via GPT-4o Vision, stores observations
-2. **Compaction Agent (30min)** - Summarizes observations, resets strikes if ≤3
-3. **Manager Agent (~2min)** - Assesses productivity, triggers interjections
+1. **Observer Agent (30s)** - Captures screen via GPT-5-mini (vision), stores observations
+2. **Compaction Agent (30min)** - Summarizes observations with GPT-5-mini, resets strikes if ≤3
+3. **Manager Agent (~2min)** - Assesses productivity with GPT-5.2, triggers interjections
 
 ## Interjection System
 
@@ -133,7 +133,7 @@ Three agents work together to monitor productivity:
 - **Frontend**: Next.js 16, React 19, Tailwind CSS 4, ShadcnUI
 - **Backend**: Python 3.12, FastAPI, OpenAI SDK
 - **Database**: SQLite (productivity.db)
-- **AI Models**: GPT-4o (vision), GPT-4o-mini (text), TTS-1, Whisper-1
+- **AI Models**: GPT-5.2 (reasoning), GPT-5-mini (vision + text), GPT-4o-mini (task parsing), TTS-1, Whisper-1
 
 ## Database Tables
 
